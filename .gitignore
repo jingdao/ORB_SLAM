@@ -1,0 +1,7 @@
+Thirdparty
+Data
+bin
+build
+*.swp
+*.bag
+
