@@ -8,6 +8,7 @@ Panels:
         - /Status1
         - /Marker1
         - /Marker1/Namespaces1
+        - /Grid1
       Splitter Ratio: 0.5
     Tree Height: 514
   - Class: rviz/Selection
@@ -43,10 +44,29 @@ Visualization Manager:
         MapPoints: true
       Queue Size: 100
       Value: true
+    - Alpha: 1
+      Cell Size: 0.1
+      Class: rviz/Grid
+      Color: 160; 160; 164
+      Enabled: true
+      Line Style:
+        Line Width: 0.03
+        Value: Lines
+      Name: Grid
+      Normal Cell Count: 0
+      Offset:
+        X: 0
+        Y: 0
+        Z: 0
+      Plane: XY
+      Plane Cell Count: 10
+      Reference Frame: <Fixed Frame>
+      Value: true
   Enabled: true
   Global Options:
     Background Color: 255; 255; 255
-    Fixed Frame: /ORB_SLAM/Camera
+    Fixed Frame: ORB_SLAM/Camera
+    Frame Rate: 30
   Name: root
   Tools:
     - Class: rviz/Interact
@@ -66,17 +86,22 @@ Visualization Manager:
   Views:
     Current:
       Class: rviz/Orbit
-      Distance: 3.996
+      Distance: 3.12275
+      Enable Stereo Rendering:
+        Stereo Eye Separation: 0.06
+        Stereo Focal Distance: 1
+        Swap Stereo Eyes: false
+        Value: false
       Focal Point:
         X: -0.111169
         Y: -0.187361
         Z: 0.713479
       Name: Current View
       Near Clip Distance: 0.01
-      Pitch: -0.854796
-      Target Frame: /ORB_SLAM/Camera
+      Pitch: -0.269796
+      Target Frame: ORB_SLAM/Camera
       Value: Orbit (rviz)
-      Yaw: 4.6604
+      Yaw: 5.0954
     Saved: ~
 Window Geometry:
   Displays:
@@ -94,5 +119,5 @@ Window Geometry:
   Views:
     collapsed: false
   Width: 929
-  X: 590
-  Y: 174
+  X: 580
+  Y: 164

@@ -151,7 +151,7 @@ void Optimizer::BundleAdjustment(const vector<KeyFrame *> &vpKFs, const vector<M
 
 }
 
-int Optimizer::PoseOptimization(Frame *pFrame)
+int Optimizer::PoseOptimization(Frame *pFrame,cv::Mat Tcw)
 {    
     g2o::SparseOptimizer optimizer;
     g2o::BlockSolverX::LinearSolverType * linearSolver;
@@ -166,10 +166,13 @@ int Optimizer::PoseOptimization(Frame *pFrame)
     optimizer.setVerbose(false);
 
     int nInitialCorrespondences=0;
+//	cout << "q1 " << pFrame->mTcw << "\n";
+//	cout << "q2 " << Tcw << "\n";
 
     // SET FRAME VERTEX
     g2o::VertexSE3Expmap * vSE3 = new g2o::VertexSE3Expmap();
     vSE3->setEstimate(Converter::toSE3Quat(pFrame->mTcw));
+//    vSE3->setEstimate(Converter::toSE3Quat(Tcw));
     vSE3->setId(0);
     vSE3->setFixed(false);
     optimizer.addVertex(vSE3);

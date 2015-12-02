@@ -35,8 +35,14 @@
 
 #include<iostream>
 #include<fstream>
+#include <geometry_msgs/PoseStamped.h>
 
-
+cv::Mat initialHectorPose;
+cv::Mat hectorPose;
+double hector_time_cur,hector_time_ini;
+bool wait_hector = false;
+cv::Mat Rcw; // Current Camera Rotation
+cv::Mat tcw; // Current Camera Translation
 using namespace std;
 
 namespace ORB_SLAM
@@ -157,17 +163,53 @@ void Tracking::SetKeyFrameDatabase(KeyFrameDatabase *pKFDB)
     mpKeyFrameDB = pKFDB;
 }
 
+void pose_callback(const geometry_msgs::PoseStampedConstPtr& poseMsg) {
+//	double qx = -poseMsg->pose.orientation.y;
+//	double qy = poseMsg->pose.orientation.z;
+//	double qz = -poseMsg->pose.orientation.x;
+//	double qw = poseMsg->pose.orientation.w;
+	double qx = poseMsg->pose.orientation.x;
+	double qy = poseMsg->pose.orientation.y;
+	double qz = poseMsg->pose.orientation.z;
+	double qw = poseMsg->pose.orientation.w;
+    cv::Mat T = cv::Mat::eye(4,4,CV_32F);
+	T.at<float>(0,0) = 1 - 2*qy*qy - 2 * qz*qz;
+	T.at<float>(0,1) = 2*qx*qy - 2 * qz*qw;
+	T.at<float>(0,2) = 2*qx*qz + 2 * qy*qw;
+	T.at<float>(1,0) = 2*qx*qy + 2 * qz*qw;
+	T.at<float>(1,1) = 1 - 2*qx*qx - 2 * qz*qz;
+	T.at<float>(1,2) = 2*qy*qz - 2 * qx*qw;
+	T.at<float>(2,0) = 2*qx*qz - 2 * qy*qw;
+	T.at<float>(2,1) = 2*qy*qz + 2 * qx*qw;
+	T.at<float>(2,2) = 1 - 2*qx*qx - 2 * qy*qy;
+//	T.at<float>(0,3) = -poseMsg->pose.position.y;
+//	T.at<float>(1,3) = poseMsg->pose.position.z;
+//	T.at<float>(2,3) = -poseMsg->pose.position.x;
+	T.at<float>(0,3) = poseMsg->pose.position.x;
+	T.at<float>(1,3) = poseMsg->pose.position.y;
+	T.at<float>(2,3) = poseMsg->pose.position.z;
+	hectorPose = T.inv();
+	hector_time_cur = poseMsg->header.stamp.toSec();
+}
+
 void Tracking::Run()
 {
     ros::NodeHandle nodeHandler;
     ros::Subscriber sub = nodeHandler.subscribe("/camera/image_raw", 1, &Tracking::GrabImage, this);
+	ros::Subscriber subPose = nodeHandler.subscribe("/slam_out_pose",1,pose_callback);
 
     ros::spin();
 }
 
 void Tracking::GrabImage(const sensor_msgs::ImageConstPtr& msg)
 {
-
+	if (wait_hector) {
+		if (initialHectorPose.at<float>(0,0) != hectorPose.at<float>(0,0)) {
+			wait_hector = false;
+			CreateInitialMap(Rcw,tcw);
+		}
+		return;
+	}
     cv::Mat im;
 
     // Copy the ros image message to cv::Mat. Convert to grayscale if it is a color image.
@@ -200,7 +242,6 @@ void Tracking::GrabImage(const sensor_msgs::ImageConstPtr& msg)
         mCurrentFrame = Frame(im,cv_ptr->header.stamp.toSec(),mpORBextractor,mpORBVocabulary,mK,mDistCoef);
     else
         mCurrentFrame = Frame(im,cv_ptr->header.stamp.toSec(),mpIniORBextractor,mpORBVocabulary,mK,mDistCoef);
-
     // Depending on the state of the Tracker we perform different tasks
 
     if(mState==NO_IMAGES_YET)
@@ -216,7 +257,7 @@ void Tracking::GrabImage(const sensor_msgs::ImageConstPtr& msg)
     }
     else if(mState==INITIALIZING)
     {
-        Initialize();
+		Initialize();
     }
     else
     {
@@ -322,6 +363,8 @@ void Tracking::FirstInitialization()
     //We ensure a minimum ORB features to continue, otherwise discard frame
     if(mCurrentFrame.mvKeys.size()>100)
     {
+		hector_time_ini = hector_time_cur;
+		initialHectorPose = hectorPose.clone();
         mInitialFrame = Frame(mCurrentFrame);
         mLastFrame = Frame(mCurrentFrame);
         mvbPrevMatched.resize(mCurrentFrame.mvKeysUn.size());
@@ -359,8 +402,8 @@ void Tracking::Initialize()
         return;
     }  
 
-    cv::Mat Rcw; // Current Camera Rotation
-    cv::Mat tcw; // Current Camera Translation
+//    cv::Mat Rcw; // Current Camera Rotation
+//    cv::Mat tcw; // Current Camera Translation
     vector<bool> vbTriangulated; // Triangulated Correspondences (mvIniMatches)
 
     if(mpInitializer->Initialize(mCurrentFrame, mvIniMatches, Rcw, tcw, mvIniP3D, vbTriangulated))
@@ -374,7 +417,10 @@ void Tracking::Initialize()
             }           
         }
 
-        CreateInitialMap(Rcw,tcw);
+		if (initialHectorPose.at<float>(0,0) != hectorPose.at<float>(0,0)) 
+			CreateInitialMap(Rcw,tcw);
+		else
+			wait_hector = true;
     }
 
 }
@@ -435,32 +481,73 @@ void Tracking::CreateInitialMap(cv::Mat &Rcw, cv::Mat &tcw)
 
     Optimizer::GlobalBundleAdjustemnt(mpMap,20);
 
-    // Set median depth to 1
-    float medianDepth = pKFini->ComputeSceneMedianDepth(2);
-    float invMedianDepth = 1.0f/medianDepth;
+	bool hack_pose = true;
+	if (hack_pose) {
+		cout << "time_ini " << mInitialFrame.mTimeStamp << "\n"; 
+		cout << "time_cur " << mCurrentFrame.mTimeStamp << "\n"; 
+		cout << "pKFcur " << pKFcur->GetPose() << "\n";
+		cout << "time_ini " << hector_time_ini << "\n"; 
+		cout << "time_cur " << hector_time_cur << "\n"; 
+		cout << "hector_ini " << initialHectorPose << "\n";
+		cout << "hector_cur " << hectorPose << "\n";
+		cv::Mat t1 = initialHectorPose.col(3).rowRange(0,3);
+		cv::Mat t2 = hectorPose.col(3).rowRange(0,3);
+		cv::Mat tc = pKFcur->GetPose().col(3).rowRange(0,3);
+		double n1 = cv::norm(t2 - t1);
+		double n2 = cv::norm(tc);
+		double scale = n1 * n1 / n2 / n2;
+		cout << "scale " << scale << "\n";
+		cv::Mat R = initialHectorPose.rowRange(0,3).colRange(0,3);
+		cv::Mat T = initialHectorPose.col(3).rowRange(0,3);
+		cv::Mat R2 = hectorPose.rowRange(0,3).colRange(0,3);
+		cv::Mat T2 = hectorPose.col(3).rowRange(0,3);
+		vector<MapPoint*> vpAllMapPoints = pKFini->GetMapPointMatches();
+		for(size_t iMP=0; iMP<vpAllMapPoints.size(); iMP++)
+		{
+			if(vpAllMapPoints[iMP])
+			{
+				MapPoint* pMP = vpAllMapPoints[iMP];
+				pMP->SetWorldPos(R * pMP->GetWorldPos() * scale + T);
+			}
+		}
+		cv::Mat iniPose = cv::Mat::eye(4,4,CV_32F);
+		cv::Mat curPose = cv::Mat::eye(4,4,CV_32F);
+		iniPose.rowRange(0,3).colRange(0,3) = R.t();
+		iniPose.col(3).rowRange(0,3) = - R * T;
+		curPose.rowRange(0,3).colRange(0,3) = R2.t();
+		curPose.col(3).rowRange(0,3) = - R2 * T2;
+		cout << "iniPose " << iniPose << "\n";
+		cout << "curPose " << curPose << "\n";
+		pKFini->SetPose(iniPose);
+		pKFcur->SetPose(curPose);
+	} else {
+		// Set median depth to 1
+		float medianDepth = pKFini->ComputeSceneMedianDepth(2);
+		float invMedianDepth = 1.0f/medianDepth;
 
-    if(medianDepth<0 || pKFcur->TrackedMapPoints()<100)
-    {
-        ROS_INFO("Wrong initialization, reseting...");
-        Reset();
-        return;
-    }
+		if(medianDepth<0 || pKFcur->TrackedMapPoints()<100)
+		{
+			ROS_INFO("Wrong initialization, reseting...");
+			Reset();
+			return;
+		}
 
-    // Scale initial baseline
-    cv::Mat Tc2w = pKFcur->GetPose();
-    Tc2w.col(3).rowRange(0,3) = Tc2w.col(3).rowRange(0,3)*invMedianDepth;
-    pKFcur->SetPose(Tc2w);
+		// Scale initial baseline
+		cv::Mat Tc2w = pKFcur->GetPose();
+		Tc2w.col(3).rowRange(0,3) = Tc2w.col(3).rowRange(0,3)*invMedianDepth;
+		pKFcur->SetPose(Tc2w);
 
-    // Scale points
-    vector<MapPoint*> vpAllMapPoints = pKFini->GetMapPointMatches();
-    for(size_t iMP=0; iMP<vpAllMapPoints.size(); iMP++)
-    {
-        if(vpAllMapPoints[iMP])
-        {
-            MapPoint* pMP = vpAllMapPoints[iMP];
-            pMP->SetWorldPos(pMP->GetWorldPos()*invMedianDepth);
-        }
-    }
+		// Scale points
+		vector<MapPoint*> vpAllMapPoints = pKFini->GetMapPointMatches();
+		for(size_t iMP=0; iMP<vpAllMapPoints.size(); iMP++)
+		{
+			if(vpAllMapPoints[iMP])
+			{
+				MapPoint* pMP = vpAllMapPoints[iMP];
+				pMP->SetWorldPos(pMP->GetWorldPos()*invMedianDepth);
+			}
+		}
+	}
 
     mpLocalMapper->InsertKeyFrame(pKFini);
     mpLocalMapper->InsertKeyFrame(pKFcur);
@@ -514,7 +601,7 @@ bool Tracking::TrackPreviousFrame()
     if(nmatches>=10)
     {
         // Optimize pose with correspondences
-        Optimizer::PoseOptimization(&mCurrentFrame);
+        Optimizer::PoseOptimization(&mCurrentFrame,hectorPose);
 
         for(size_t i =0; i<mCurrentFrame.mvbOutlier.size(); i++)
             if(mCurrentFrame.mvbOutlier[i])
@@ -537,7 +624,7 @@ bool Tracking::TrackPreviousFrame()
         return false;
 
     // Optimize pose again with all correspondences
-    Optimizer::PoseOptimization(&mCurrentFrame);
+    Optimizer::PoseOptimization(&mCurrentFrame,hectorPose);
 
     // Discard outliers
     for(size_t i =0; i<mCurrentFrame.mvbOutlier.size(); i++)
@@ -568,7 +655,7 @@ bool Tracking::TrackWithMotionModel()
        return false;
 
     // Optimize pose with all correspondences
-    Optimizer::PoseOptimization(&mCurrentFrame);
+    Optimizer::PoseOptimization(&mCurrentFrame,hectorPose);
 
     // Discard outliers
     for(size_t i =0; i<mCurrentFrame.mvpMapPoints.size(); i++)
@@ -600,7 +687,7 @@ bool Tracking::TrackLocalMap()
     SearchReferencePointsInFrustum();
 
     // Optimize Pose
-    mnMatchesInliers = Optimizer::PoseOptimization(&mCurrentFrame);
+    mnMatchesInliers = Optimizer::PoseOptimization(&mCurrentFrame,hectorPose);
 
     // Update MapPoints Statistics
     for(size_t i=0; i<mCurrentFrame.mvpMapPoints.size(); i++)
@@ -945,7 +1032,7 @@ bool Tracking::Relocalisation()
                         mCurrentFrame.mvpMapPoints[j]=NULL;
                 }
 
-                int nGood = Optimizer::PoseOptimization(&mCurrentFrame);
+                int nGood = Optimizer::PoseOptimization(&mCurrentFrame,hectorPose);
 
                 if(nGood<10)
                     continue;
@@ -961,7 +1048,7 @@ bool Tracking::Relocalisation()
 
                     if(nadditional+nGood>=50)
                     {
-                        nGood = Optimizer::PoseOptimization(&mCurrentFrame);
+                        nGood = Optimizer::PoseOptimization(&mCurrentFrame,hectorPose);
 
                         // If many inliers but still not enough, search by projection again in a narrower window
                         // the camera has been already optimized with many points
@@ -976,7 +1063,7 @@ bool Tracking::Relocalisation()
                             // Final optimization
                             if(nGood+nadditional>=50)
                             {
-                                nGood = Optimizer::PoseOptimization(&mCurrentFrame);
+                                nGood = Optimizer::PoseOptimization(&mCurrentFrame,hectorPose);
 
                                 for(size_t io =0; io<mCurrentFrame.mvbOutlier.size(); io++)
                                     if(mCurrentFrame.mvbOutlier[io])
