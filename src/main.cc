@@ -96,6 +96,7 @@ int main(int argc, char **argv)
     
     ORB_SLAM::ORBVocabulary Vocabulary;
     bool bVocLoad = Vocabulary.loadFromTextFile(strVocFile);
+//	bool bVocLoad = true;
 
     if(!bVocLoad)
     {

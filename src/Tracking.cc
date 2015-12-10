@@ -36,6 +36,7 @@
 #include<iostream>
 #include<fstream>
 #include <geometry_msgs/PoseStamped.h>
+#define FLIP_AXES 1
 
 cv::Mat initialHectorPose;
 cv::Mat hectorPose;
@@ -164,14 +165,17 @@ void Tracking::SetKeyFrameDatabase(KeyFrameDatabase *pKFDB)
 }
 
 void pose_callback(const geometry_msgs::PoseStampedConstPtr& poseMsg) {
-//	double qx = -poseMsg->pose.orientation.y;
-//	double qy = poseMsg->pose.orientation.z;
-//	double qz = -poseMsg->pose.orientation.x;
-//	double qw = poseMsg->pose.orientation.w;
+#if FLIP_AXES
+	double qx = -poseMsg->pose.orientation.y;
+	double qy = poseMsg->pose.orientation.z;
+	double qz = -poseMsg->pose.orientation.x;
+	double qw = poseMsg->pose.orientation.w;
+#else
 	double qx = poseMsg->pose.orientation.x;
 	double qy = poseMsg->pose.orientation.y;
 	double qz = poseMsg->pose.orientation.z;
 	double qw = poseMsg->pose.orientation.w;
+#endif
     cv::Mat T = cv::Mat::eye(4,4,CV_32F);
 	T.at<float>(0,0) = 1 - 2*qy*qy - 2 * qz*qz;
 	T.at<float>(0,1) = 2*qx*qy - 2 * qz*qw;
@@ -182,12 +186,15 @@ void pose_callback(const geometry_msgs::PoseStampedConstPtr& poseMsg) {
 	T.at<float>(2,0) = 2*qx*qz - 2 * qy*qw;
 	T.at<float>(2,1) = 2*qy*qz + 2 * qx*qw;
 	T.at<float>(2,2) = 1 - 2*qx*qx - 2 * qy*qy;
-//	T.at<float>(0,3) = -poseMsg->pose.position.y;
-//	T.at<float>(1,3) = poseMsg->pose.position.z;
-//	T.at<float>(2,3) = -poseMsg->pose.position.x;
+#if FLIP_AXES
+	T.at<float>(0,3) = -poseMsg->pose.position.y;
+	T.at<float>(1,3) = poseMsg->pose.position.z;
+	T.at<float>(2,3) = -poseMsg->pose.position.x;
+#else
 	T.at<float>(0,3) = poseMsg->pose.position.x;
 	T.at<float>(1,3) = poseMsg->pose.position.y;
 	T.at<float>(2,3) = poseMsg->pose.position.z;
+#endif
 	hectorPose = T.inv();
 	hector_time_cur = poseMsg->header.stamp.toSec();
 }
@@ -481,7 +488,7 @@ void Tracking::CreateInitialMap(cv::Mat &Rcw, cv::Mat &tcw)
 
     Optimizer::GlobalBundleAdjustemnt(mpMap,20);
 
-	bool hack_pose = true;
+	bool hack_pose = false;
 	if (hack_pose) {
 		cout << "time_ini " << mInitialFrame.mTimeStamp << "\n"; 
 		cout << "time_cur " << mCurrentFrame.mTimeStamp << "\n"; 
@@ -495,12 +502,12 @@ void Tracking::CreateInitialMap(cv::Mat &Rcw, cv::Mat &tcw)
 		cv::Mat tc = pKFcur->GetPose().col(3).rowRange(0,3);
 		double n1 = cv::norm(t2 - t1);
 		double n2 = cv::norm(tc);
-		double scale = n1 * n1 / n2 / n2;
+		double scale = n1 * n1 / n2 / n2 * 1;
 		cout << "scale " << scale << "\n";
 		cv::Mat R = initialHectorPose.rowRange(0,3).colRange(0,3);
-		cv::Mat T = initialHectorPose.col(3).rowRange(0,3);
+		cv::Mat T = initialHectorPose.col(3).rowRange(0,3) * 1;
 		cv::Mat R2 = hectorPose.rowRange(0,3).colRange(0,3);
-		cv::Mat T2 = hectorPose.col(3).rowRange(0,3);
+		cv::Mat T2 = hectorPose.col(3).rowRange(0,3) * 1;
 		vector<MapPoint*> vpAllMapPoints = pKFini->GetMapPointMatches();
 		for(size_t iMP=0; iMP<vpAllMapPoints.size(); iMP++)
 		{
