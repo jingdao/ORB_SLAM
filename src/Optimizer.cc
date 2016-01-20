@@ -20,6 +20,9 @@
 
 #include "Optimizer.h"
 
+#include "Thirdparty/g2o/g2o/core/sparse_optimizer.h"
+#include "Thirdparty/g2o/g2o/core/base_vertex.h"
+#include "Thirdparty/g2o/g2o/core/base_unary_edge.h"
 #include "Thirdparty/g2o/g2o/core/block_solver.h"
 #include "Thirdparty/g2o/g2o/core/optimization_algorithm_levenberg.h"
 #include "Thirdparty/g2o/g2o/solvers/cholmod/linear_solver_cholmod.h"
@@ -34,6 +37,116 @@
 
 namespace ORB_SLAM
 {
+
+class VertexMapPoint : public g2o::BaseVertex<3, Eigen::Vector3d> {
+	public:
+	EIGEN_MAKE_ALIGNED_OPERATOR_NEW;
+	VertexMapPoint() {}
+
+	virtual bool read(std::istream& /*is*/) {return false;}
+	virtual bool write(std::ostream& /*os*/) const {return false;}
+	virtual void setToOriginImpl() {}
+	virtual void oplusImpl(const double* update) {
+		Eigen::Vector3d::ConstMapType v(update);
+		_estimate += v;
+	}
+};
+
+class EdgeProjection : public g2o::BaseUnaryEdge<2, Eigen::Vector2d, VertexMapPoint> {
+	public:
+	EIGEN_MAKE_ALIGNED_OPERATOR_NEW;
+	EdgeProjection() {}
+	Eigen::Matrix<double,3,3> Rcw;
+	Eigen::Vector3d Tcw;
+	double fx,fy;
+	virtual bool read(std::istream& /*is*/) {return false;}
+	virtual bool write(std::ostream& /*os*/) const {return false;}
+
+	void computeError() {
+		const VertexMapPoint* mp = static_cast<const VertexMapPoint*>(vertex(0));
+		Eigen::Vector3d xc = Rcw * mp->estimate() + Tcw;
+		double u = - fx * xc(0) / xc(2);
+		double v = - fy * xc(1) / xc(2);
+		_error(0) = u - measurement()(0);
+		_error(1) = v - measurement()(1);
+	}
+
+	void linearizeOplus() {
+		const VertexMapPoint* mp = static_cast<const VertexMapPoint*>(vertex(0));
+		Eigen::Vector3d xc = Rcw * mp->estimate() + Tcw;
+		_jacobianOplusXi(0,0) = fx / xc(2) / xc(2) * (Rcw(2,0) * xc(0) - Rcw(0,0) * xc(2));
+		_jacobianOplusXi(0,1) = fx / xc(2) / xc(2) * (Rcw(2,1) * xc(0) - Rcw(0,1) * xc(2));
+		_jacobianOplusXi(0,2) = fx / xc(2) / xc(2) * (Rcw(2,2) * xc(0) - Rcw(0,2) * xc(2));
+		_jacobianOplusXi(1,0) = fy / xc(2) / xc(2) * (Rcw(2,0) * xc(1) - Rcw(1,0) * xc(2));
+		_jacobianOplusXi(1,1) = fy / xc(2) / xc(2) * (Rcw(2,1) * xc(1) - Rcw(1,1) * xc(2));
+		_jacobianOplusXi(1,2) = fy / xc(2) / xc(2) * (Rcw(2,2) * xc(1) - Rcw(1,2) * xc(2));
+	}
+};
+
+void Optimizer::Triangulation(Frame* initialFrame,Frame* currentFrame,vector<int> matches,
+	Eigen::Matrix<double,3,3> Rcw1,Eigen::Vector3d Tcw1,
+	Eigen::Matrix<double,3,3> Rcw2,Eigen::Vector3d Tcw2,
+	vector<MapPoint*> vpMP) {
+    for(size_t i=0; i<matches.size();i++) {
+        if(matches[i]<0)
+            continue;
+		//initialize solver
+		g2o::SparseOptimizer optimizer;
+		g2o::BlockSolverX::LinearSolverType *linearSolver = new g2o::LinearSolverDense<g2o::BlockSolverX::PoseMatrixType>();
+		g2o::BlockSolverX *blocksolver = new g2o::BlockSolverX(linearSolver);
+		g2o::OptimizationAlgorithmLevenberg* solver = new g2o::OptimizationAlgorithmLevenberg(blocksolver);
+		optimizer.setAlgorithm(solver);
+		optimizer.setVerbose(false);
+
+		//add vertex
+		VertexMapPoint *vt = new VertexMapPoint();
+		vt->setId(0);
+		optimizer.addVertex(vt);
+
+		//add edges
+		EdgeProjection* e1 = new EdgeProjection();
+		e1->setInformation(Eigen::Matrix<double,2,2>::Identity());
+		e1->setVertex(0,vt);
+		e1->setMeasurement(Eigen::Vector2d(
+			initialFrame->mvKeysUn[i].pt.x - initialFrame->cx,
+			initialFrame->cy - initialFrame->mvKeysUn[i].pt.y
+			));
+		e1->Rcw = Rcw1;
+		e1->Tcw = Tcw1;
+		e1->fx = initialFrame->fx;
+		e1->fy = initialFrame->fy;
+		optimizer.addEdge(e1);
+		EdgeProjection* e2 = new EdgeProjection();
+		e2->setInformation(Eigen::Matrix<double,2,2>::Identity());
+		e2->setVertex(0,vt);
+		e2->setMeasurement(Eigen::Vector2d(
+			currentFrame->mvKeysUn[matches[i]].pt.x - currentFrame->cx,
+			currentFrame->cy - currentFrame->mvKeysUn[matches[i]].pt.y
+			));
+		e2->Rcw = Rcw2;
+		e2->Tcw = Tcw2;
+		e2->fx = currentFrame->fx;
+		e2->fy = currentFrame->fy;
+		optimizer.addEdge(e2);
+
+		//optimize
+		Eigen::Vector3d bestEstimate;
+		double leastError;
+		const int numSeeds = 10;
+		const int numIterations = 10;
+		for (int j=0;j<numSeeds;j++) {
+			vt->setEstimate(Eigen::Vector3d(1.0 / RAND_MAX * rand(), 1.0 / RAND_MAX * rand(), 1.0 / RAND_MAX * rand()));
+			optimizer.initializeOptimization();
+			optimizer.optimize(numIterations);
+			if (j==0 || optimizer.activeChi2() < leastError) {
+				bestEstimate = vt->estimate();
+				leastError = optimizer.activeChi2();
+			}
+		}
+		cv::Mat worldPos = (cv::Mat_<double>(3,1) << bestEstimate(0),bestEstimate(1),bestEstimate(2));
+		vpMP[i]->SetWorldPos(worldPos);
+	}
+}
 
 void Optimizer::GlobalBundleAdjustemnt(Map* pMap, int nIterations, bool* pbStopFlag)
 {

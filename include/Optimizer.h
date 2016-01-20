@@ -37,6 +37,10 @@ class LoopClosing;
 class Optimizer
 {
 public:
+	void static Triangulation(Frame* initialFrame,Frame* currentFrame,vector<int> matches,
+		Eigen::Matrix<double,3,3> Rcw1,Eigen::Vector3d Tcw1,
+		Eigen::Matrix<double,3,3> Rcw2,Eigen::Vector3d Tcw2,
+		vector<MapPoint*> vpMP);
     void static BundleAdjustment(const std::vector<KeyFrame*> &vpKF, const std::vector<MapPoint*> &vpMP, int nIterations = 5, bool *pbStopFlag=NULL);
     void static GlobalBundleAdjustemnt(Map* pMap, int nIterations=5, bool *pbStopFlag=NULL);
     void static LocalBundleAdjustment(KeyFrame* pKF, bool *pbStopFlag=NULL);

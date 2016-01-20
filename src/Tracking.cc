@@ -36,18 +36,54 @@
 #include<iostream>
 #include<fstream>
 #include <geometry_msgs/PoseStamped.h>
-#define FLIP_AXES 1
 
-cv::Mat initialHectorPose;
-cv::Mat hectorPose;
-double hector_time_cur,hector_time_ini;
+geometry_msgs::PoseStamped initialHectorPose_msg;
+geometry_msgs::PoseStamped hectorPose_msg;
+cv::Mat hectorPose = cv::Mat::eye(4,4,CV_32F);
+double hector_time_cur=0,hector_time_ini=0;
 bool wait_hector = false;
+double minOffset = 0.01;
 cv::Mat Rcw; // Current Camera Rotation
 cv::Mat tcw; // Current Camera Translation
 using namespace std;
 
 namespace ORB_SLAM
 {
+
+Eigen::Matrix<double,3,3> poseToRotation(geometry_msgs::PoseStamped msg) {
+	double qx = msg.pose.orientation.x;
+	double qy = msg.pose.orientation.y;
+	double qz = msg.pose.orientation.z;
+	double qw = msg.pose.orientation.w;
+	Eigen::Matrix<double,3,3> R;
+	R << 1 - 2*qy*qy - 2 * qz*qz,
+	2*qx*qy - 2 * qz*qw,
+	2*qx*qz + 2 * qy*qw,
+	2*qx*qy + 2 * qz*qw,
+	1 - 2*qx*qx - 2 * qz*qz,
+	2*qy*qz - 2 * qx*qw,
+	2*qx*qz - 2 * qy*qw,
+	2*qy*qz + 2 * qx*qw,
+	1 - 2*qx*qx - 2 * qy*qy;
+	return R;
+}
+
+Eigen::Vector3d poseToTranslation(geometry_msgs::PoseStamped msg) {
+	Eigen::Vector3d T;
+	T << 
+		msg.pose.position.x,
+		msg.pose.position.y,
+		msg.pose.position.z;
+	return T;
+}
+
+double poseToOffset(geometry_msgs::PoseStamped p1,geometry_msgs::PoseStamped p2) {
+	double d = 0;
+	d += (p1.pose.position.x - p2.pose.position.x) * (p1.pose.position.x - p2.pose.position.x);
+	d += (p1.pose.position.y - p2.pose.position.y) * (p1.pose.position.y - p2.pose.position.y);
+	d += (p1.pose.position.z - p2.pose.position.z) * (p1.pose.position.z - p2.pose.position.z);
+	return sqrt(d);
+}
 
 
 Tracking::Tracking(ORBVocabulary* pVoc, FramePublisher *pFramePublisher, MapPublisher *pMapPublisher, Map *pMap, string strSettingPath):
@@ -165,37 +201,7 @@ void Tracking::SetKeyFrameDatabase(KeyFrameDatabase *pKFDB)
 }
 
 void pose_callback(const geometry_msgs::PoseStampedConstPtr& poseMsg) {
-#if FLIP_AXES
-	double qx = -poseMsg->pose.orientation.y;
-	double qy = poseMsg->pose.orientation.z;
-	double qz = -poseMsg->pose.orientation.x;
-	double qw = poseMsg->pose.orientation.w;
-#else
-	double qx = poseMsg->pose.orientation.x;
-	double qy = poseMsg->pose.orientation.y;
-	double qz = poseMsg->pose.orientation.z;
-	double qw = poseMsg->pose.orientation.w;
-#endif
-    cv::Mat T = cv::Mat::eye(4,4,CV_32F);
-	T.at<float>(0,0) = 1 - 2*qy*qy - 2 * qz*qz;
-	T.at<float>(0,1) = 2*qx*qy - 2 * qz*qw;
-	T.at<float>(0,2) = 2*qx*qz + 2 * qy*qw;
-	T.at<float>(1,0) = 2*qx*qy + 2 * qz*qw;
-	T.at<float>(1,1) = 1 - 2*qx*qx - 2 * qz*qz;
-	T.at<float>(1,2) = 2*qy*qz - 2 * qx*qw;
-	T.at<float>(2,0) = 2*qx*qz - 2 * qy*qw;
-	T.at<float>(2,1) = 2*qy*qz + 2 * qx*qw;
-	T.at<float>(2,2) = 1 - 2*qx*qx - 2 * qy*qy;
-#if FLIP_AXES
-	T.at<float>(0,3) = -poseMsg->pose.position.y;
-	T.at<float>(1,3) = poseMsg->pose.position.z;
-	T.at<float>(2,3) = -poseMsg->pose.position.x;
-#else
-	T.at<float>(0,3) = poseMsg->pose.position.x;
-	T.at<float>(1,3) = poseMsg->pose.position.y;
-	T.at<float>(2,3) = poseMsg->pose.position.z;
-#endif
-	hectorPose = T.inv();
+	hectorPose_msg = *poseMsg;
 	hector_time_cur = poseMsg->header.stamp.toSec();
 }
 
@@ -211,7 +217,7 @@ void Tracking::Run()
 void Tracking::GrabImage(const sensor_msgs::ImageConstPtr& msg)
 {
 	if (wait_hector) {
-		if (initialHectorPose.at<float>(0,0) != hectorPose.at<float>(0,0)) {
+		if (poseToOffset(initialHectorPose_msg,hectorPose_msg) > minOffset) {
 			wait_hector = false;
 			CreateInitialMap(Rcw,tcw);
 		}
@@ -368,10 +374,10 @@ void Tracking::GrabImage(const sensor_msgs::ImageConstPtr& msg)
 void Tracking::FirstInitialization()
 {
     //We ensure a minimum ORB features to continue, otherwise discard frame
-    if(mCurrentFrame.mvKeys.size()>100)
+    if(hector_time_cur > 0 && mCurrentFrame.mvKeys.size()>100)
     {
 		hector_time_ini = hector_time_cur;
-		initialHectorPose = hectorPose.clone();
+		initialHectorPose_msg = hectorPose_msg;
         mInitialFrame = Frame(mCurrentFrame);
         mLastFrame = Frame(mCurrentFrame);
         mvbPrevMatched.resize(mCurrentFrame.mvKeysUn.size());
@@ -424,10 +430,11 @@ void Tracking::Initialize()
             }           
         }
 
-		if (initialHectorPose.at<float>(0,0) != hectorPose.at<float>(0,0)) 
+		if (poseToOffset(initialHectorPose_msg,hectorPose_msg) > minOffset) {
 			CreateInitialMap(Rcw,tcw);
-		else
+		} else {
 			wait_hector = true;
+		}
     }
 
 }
@@ -451,14 +458,44 @@ void Tracking::CreateInitialMap(cv::Mat &Rcw, cv::Mat &tcw)
     mpMap->AddKeyFrame(pKFini);
     mpMap->AddKeyFrame(pKFcur);
 
+	//Write to pose file
+	FILE* pose_stamped = fopen("/home/jd/Documents/vslam/orb/pose_stamped.txt","w");
+	FILE* key_match = fopen("/home/jd/Documents/vslam/orb/key.match","w");
+	FILE* map_point = fopen("/home/jd/Documents/vslam/orb/map_point.txt","w");
+	fprintf(pose_stamped,"%f %f %f %f %f %f %f %f\n",
+		initialHectorPose_msg.header.stamp.toSec(),
+		initialHectorPose_msg.pose.position.x,
+		initialHectorPose_msg.pose.position.y,
+		initialHectorPose_msg.pose.position.z,
+		initialHectorPose_msg.pose.orientation.w,
+		initialHectorPose_msg.pose.orientation.x,
+		initialHectorPose_msg.pose.orientation.y,
+		initialHectorPose_msg.pose.orientation.z);
+	fprintf(pose_stamped,"%f %f %f %f %f %f %f %f\n",
+		hectorPose_msg.header.stamp.toSec(),
+		hectorPose_msg.pose.position.x,
+		hectorPose_msg.pose.position.y,
+		hectorPose_msg.pose.position.z,
+		hectorPose_msg.pose.orientation.w,
+		hectorPose_msg.pose.orientation.x,
+		hectorPose_msg.pose.orientation.y,
+		hectorPose_msg.pose.orientation.z);
+	fclose(pose_stamped);
+
     // Create MapPoints and asscoiate to keyframes
     for(size_t i=0; i<mvIniMatches.size();i++)
     {
         if(mvIniMatches[i]<0)
             continue;
 
+		//write to match file
+		fprintf(key_match,"0 %f %f 1 %f %f\n",
+			mInitialFrame.mvKeysUn[i].pt.x,mInitialFrame.mvKeysUn[i].pt.y,
+			mCurrentFrame.mvKeysUn[mvIniMatches[i]].pt.x,mCurrentFrame.mvKeysUn[mvIniMatches[i]].pt.y);
+
         //Create MapPoint.
         cv::Mat worldPos(mvIniP3D[i]);
+//		printf("%f %f %f\n",worldPos.at<float>(0,0),worldPos.at<float>(1,0),worldPos.at<float>(2,0));
 
         MapPoint* pMP = new MapPoint(worldPos,pKFcur,mpMap);
 
@@ -484,7 +521,7 @@ void Tracking::CreateInitialMap(cv::Mat &Rcw, cv::Mat &tcw)
     pKFcur->UpdateConnections();
 
     // Bundle Adjustment
-    ROS_INFO("New Map created with %d points",mpMap->MapPointsInMap());
+    ROS_INFO("New Map created with %d points (%lu matches)",mpMap->MapPointsInMap(),mvIniMatches.size());
 
     Optimizer::GlobalBundleAdjustemnt(mpMap,20);
 
@@ -495,38 +532,58 @@ void Tracking::CreateInitialMap(cv::Mat &Rcw, cv::Mat &tcw)
 		cout << "pKFcur " << pKFcur->GetPose() << "\n";
 		cout << "time_ini " << hector_time_ini << "\n"; 
 		cout << "time_cur " << hector_time_cur << "\n"; 
-		cout << "hector_ini " << initialHectorPose << "\n";
-		cout << "hector_cur " << hectorPose << "\n";
-		cv::Mat t1 = initialHectorPose.col(3).rowRange(0,3);
-		cv::Mat t2 = hectorPose.col(3).rowRange(0,3);
-		cv::Mat tc = pKFcur->GetPose().col(3).rowRange(0,3);
-		double n1 = cv::norm(t2 - t1);
-		double n2 = cv::norm(tc);
-		double scale = n1 * n1 / n2 / n2 * 1;
-		cout << "scale " << scale << "\n";
-		cv::Mat R = initialHectorPose.rowRange(0,3).colRange(0,3);
-		cv::Mat T = initialHectorPose.col(3).rowRange(0,3) * 1;
-		cv::Mat R2 = hectorPose.rowRange(0,3).colRange(0,3);
-		cv::Mat T2 = hectorPose.col(3).rowRange(0,3) * 1;
+//		cv::Mat t1 = initialHectorPose.col(3).rowRange(0,3);
+//		cv::Mat t2 = hectorPose.col(3).rowRange(0,3);
+//		cv::Mat tc = pKFcur->GetPose().col(3).rowRange(0,3);
+//		double n1 = cv::norm(t2 - t1);
+//		double n2 = cv::norm(tc);
+//		double scale = n1 * n1 / n2 / n2 * 1;
+//		cout << "scale " << scale << "\n";
+//		cv::Mat R = initialHectorPose.rowRange(0,3).colRange(0,3);
+//		cv::Mat T = initialHectorPose.col(3).rowRange(0,3) * 1;
+//		cv::Mat R2 = hectorPose.rowRange(0,3).colRange(0,3);
+//		cv::Mat T2 = hectorPose.col(3).rowRange(0,3) * 1;
+//		vector<MapPoint*> vpAllMapPoints = pKFini->GetMapPointMatches();
+//		for(size_t iMP=0; iMP<vpAllMapPoints.size(); iMP++)
+//		{
+//			if(vpAllMapPoints[iMP])
+//			{
+//				MapPoint* pMP = vpAllMapPoints[iMP];
+//				pMP->SetWorldPos(R * pMP->GetWorldPos() * scale + T);
+//			}
+//		}
+//		cv::Mat iniPose = cv::Mat::eye(4,4,CV_32F);
+//		cv::Mat curPose = cv::Mat::eye(4,4,CV_32F);
+//		iniPose.rowRange(0,3).colRange(0,3) = R.t();
+//		iniPose.col(3).rowRange(0,3) = - R * T;
+//		curPose.rowRange(0,3).colRange(0,3) = R2.t();
+//		curPose.col(3).rowRange(0,3) = - R2 * T2;
+//		cout << "iniPose " << iniPose << "\n";
+//		cout << "curPose " << curPose << "\n";
+//		pKFini->SetPose(iniPose);
+//		pKFcur->SetPose(curPose);
+
+		Eigen::Matrix<double,3,3> Rcl;
+		Eigen::Vector3d Tcl;
+		Rcl << 1,0,0,0,0,1,0,-1,0;
+		Tcl << 0,0.25,0.18;
+		Eigen::Matrix<double,3,3> Rwl1 = poseToRotation(initialHectorPose_msg);
+		Eigen::Vector3d Twl1 = poseToTranslation(initialHectorPose_msg);
+		Eigen::Matrix<double,3,3> Rwl2 = poseToRotation(hectorPose_msg);
+		Eigen::Vector3d Twl2 = poseToTranslation(hectorPose_msg);
+		Eigen::Matrix<double,3,3> Rcw1 = Rcl * Rwl1.transpose();
+		Eigen::Vector3d Tcw1 = - Rcl * Rwl1.transpose() * Twl1 + Tcl;
+		Eigen::Matrix<double,3,3> Rcw2 = Rcl * Rwl2.transpose();
+		Eigen::Vector3d Tcw2 = - Rcl * Rwl2.transpose() * Twl2 + Tcl;
 		vector<MapPoint*> vpAllMapPoints = pKFini->GetMapPointMatches();
-		for(size_t iMP=0; iMP<vpAllMapPoints.size(); iMP++)
-		{
-			if(vpAllMapPoints[iMP])
-			{
+		Optimizer::Triangulation(&mInitialFrame,&mCurrentFrame,mvIniMatches,Rcw1,Tcw1,Rcw2,Tcw2,vpAllMapPoints);
+		for(size_t iMP=0; iMP<vpAllMapPoints.size(); iMP++) {
+			if(vpAllMapPoints[iMP]) {
 				MapPoint* pMP = vpAllMapPoints[iMP];
-				pMP->SetWorldPos(R * pMP->GetWorldPos() * scale + T);
+				cv::Mat worldPos = pMP->GetWorldPos();
+				fprintf(map_point,"%f %f %f\n",worldPos.at<double>(0,0),worldPos.at<double>(1,0),worldPos.at<double>(2,0));
 			}
 		}
-		cv::Mat iniPose = cv::Mat::eye(4,4,CV_32F);
-		cv::Mat curPose = cv::Mat::eye(4,4,CV_32F);
-		iniPose.rowRange(0,3).colRange(0,3) = R.t();
-		iniPose.col(3).rowRange(0,3) = - R * T;
-		curPose.rowRange(0,3).colRange(0,3) = R2.t();
-		curPose.col(3).rowRange(0,3) = - R2 * T2;
-		cout << "iniPose " << iniPose << "\n";
-		cout << "curPose " << curPose << "\n";
-		pKFini->SetPose(iniPose);
-		pKFcur->SetPose(curPose);
 	} else {
 		// Set median depth to 1
 		float medianDepth = pKFini->ComputeSceneMedianDepth(2);
@@ -552,9 +609,13 @@ void Tracking::CreateInitialMap(cv::Mat &Rcw, cv::Mat &tcw)
 			{
 				MapPoint* pMP = vpAllMapPoints[iMP];
 				pMP->SetWorldPos(pMP->GetWorldPos()*invMedianDepth);
+				cv::Mat worldPos = pMP->GetWorldPos();
+				fprintf(map_point,"%f %f %f\n",worldPos.at<float>(0,0),worldPos.at<float>(1,0),worldPos.at<float>(2,0));
 			}
 		}
 	}
+	fclose(key_match);
+	fclose(map_point);
 
     mpLocalMapper->InsertKeyFrame(pKFini);
     mpLocalMapper->InsertKeyFrame(pKFcur);
