@@ -295,8 +295,9 @@ void Tracking::GrabImage(const sensor_msgs::ImageConstPtr& msg)
         }
 
         // If we have an initial estimation of the camera pose and matching. Track the local map.
-        if(bOK)
+        if(bOK) {
             bOK = TrackLocalMap();
+		}
 
         // If tracking were good, check if we insert a keyframe
         if(bOK)
@@ -525,65 +526,45 @@ void Tracking::CreateInitialMap(cv::Mat &Rcw, cv::Mat &tcw)
 
     Optimizer::GlobalBundleAdjustemnt(mpMap,20);
 
-	bool hack_pose = false;
+	bool hack_pose = true;
 	if (hack_pose) {
 		cout << "time_ini " << mInitialFrame.mTimeStamp << "\n"; 
 		cout << "time_cur " << mCurrentFrame.mTimeStamp << "\n"; 
 		cout << "pKFcur " << pKFcur->GetPose() << "\n";
 		cout << "time_ini " << hector_time_ini << "\n"; 
 		cout << "time_cur " << hector_time_cur << "\n"; 
-//		cv::Mat t1 = initialHectorPose.col(3).rowRange(0,3);
-//		cv::Mat t2 = hectorPose.col(3).rowRange(0,3);
-//		cv::Mat tc = pKFcur->GetPose().col(3).rowRange(0,3);
-//		double n1 = cv::norm(t2 - t1);
-//		double n2 = cv::norm(tc);
-//		double scale = n1 * n1 / n2 / n2 * 1;
-//		cout << "scale " << scale << "\n";
-//		cv::Mat R = initialHectorPose.rowRange(0,3).colRange(0,3);
-//		cv::Mat T = initialHectorPose.col(3).rowRange(0,3) * 1;
-//		cv::Mat R2 = hectorPose.rowRange(0,3).colRange(0,3);
-//		cv::Mat T2 = hectorPose.col(3).rowRange(0,3) * 1;
-//		vector<MapPoint*> vpAllMapPoints = pKFini->GetMapPointMatches();
-//		for(size_t iMP=0; iMP<vpAllMapPoints.size(); iMP++)
-//		{
-//			if(vpAllMapPoints[iMP])
-//			{
-//				MapPoint* pMP = vpAllMapPoints[iMP];
-//				pMP->SetWorldPos(R * pMP->GetWorldPos() * scale + T);
-//			}
-//		}
-//		cv::Mat iniPose = cv::Mat::eye(4,4,CV_32F);
-//		cv::Mat curPose = cv::Mat::eye(4,4,CV_32F);
-//		iniPose.rowRange(0,3).colRange(0,3) = R.t();
-//		iniPose.col(3).rowRange(0,3) = - R * T;
-//		curPose.rowRange(0,3).colRange(0,3) = R2.t();
-//		curPose.col(3).rowRange(0,3) = - R2 * T2;
-//		cout << "iniPose " << iniPose << "\n";
-//		cout << "curPose " << curPose << "\n";
-//		pKFini->SetPose(iniPose);
-//		pKFcur->SetPose(curPose);
 
 		Eigen::Matrix<double,3,3> Rcl;
-		Eigen::Vector3d Tcl;
-		Rcl << 1,0,0,0,0,1,0,-1,0;
-		Tcl << 0,0.25,0.18;
+		Eigen::Vector3d tcl;
+		Rcl << 1,0,0,0,0,-1,0,1,0;
+		tcl << 0,-0.25,-0.18;
 		Eigen::Matrix<double,3,3> Rwl1 = poseToRotation(initialHectorPose_msg);
-		Eigen::Vector3d Twl1 = poseToTranslation(initialHectorPose_msg);
+		Eigen::Vector3d twl1 = poseToTranslation(initialHectorPose_msg);
 		Eigen::Matrix<double,3,3> Rwl2 = poseToRotation(hectorPose_msg);
-		Eigen::Vector3d Twl2 = poseToTranslation(hectorPose_msg);
+		Eigen::Vector3d twl2 = poseToTranslation(hectorPose_msg);
 		Eigen::Matrix<double,3,3> Rcw1 = Rcl * Rwl1.transpose();
-		Eigen::Vector3d Tcw1 = - Rcl * Rwl1.transpose() * Twl1 + Tcl;
+		Eigen::Vector3d tcw1 = - Rcl * Rwl1.transpose() * twl1 + tcl;
 		Eigen::Matrix<double,3,3> Rcw2 = Rcl * Rwl2.transpose();
-		Eigen::Vector3d Tcw2 = - Rcl * Rwl2.transpose() * Twl2 + Tcl;
+		Eigen::Vector3d tcw2 = - Rcl * Rwl2.transpose() * twl2 + tcl;
 		vector<MapPoint*> vpAllMapPoints = pKFini->GetMapPointMatches();
-		Optimizer::Triangulation(&mInitialFrame,&mCurrentFrame,mvIniMatches,Rcw1,Tcw1,Rcw2,Tcw2,vpAllMapPoints);
+		Optimizer::Triangulation(&mInitialFrame,&mCurrentFrame,mvIniMatches,Rcw1,tcw1,Rcw2,tcw2,vpAllMapPoints);
 		for(size_t iMP=0; iMP<vpAllMapPoints.size(); iMP++) {
 			if(vpAllMapPoints[iMP]) {
 				MapPoint* pMP = vpAllMapPoints[iMP];
 				cv::Mat worldPos = pMP->GetWorldPos();
-				fprintf(map_point,"%f %f %f\n",worldPos.at<double>(0,0),worldPos.at<double>(1,0),worldPos.at<double>(2,0));
+				fprintf(map_point,"%f %f %f\n",worldPos.at<float>(0,0),worldPos.at<float>(1,0),worldPos.at<float>(2,0));
 			}
 		}
+		Eigen::Matrix<double,4,4> Tcw1 = Eigen::Matrix<double,4,4>::Identity();
+		Tcw1.block(0,0,3,3) = Rcw1;
+		Tcw1.block(0,3,3,1) = tcw1;
+		Eigen::Matrix<double,4,4> Tcw2 = Eigen::Matrix<double,4,4>::Identity();
+		Tcw2.block(0,0,3,3) = Rcw2;
+		Tcw2.block(0,3,3,1) = tcw2;
+		pKFini->SetPose(Converter::toCvMat(Tcw1));
+		pKFcur->SetPose(Converter::toCvMat(Tcw2));
+		cout << "pKFini " << pKFini->GetPose() << "\n";
+		cout << "pKFcur " << pKFcur->GetPose() << "\n";
 	} else {
 		// Set median depth to 1
 		float medianDepth = pKFini->ComputeSceneMedianDepth(2);
@@ -620,6 +601,7 @@ void Tracking::CreateInitialMap(cv::Mat &Rcw, cv::Mat &tcw)
     mpLocalMapper->InsertKeyFrame(pKFini);
     mpLocalMapper->InsertKeyFrame(pKFcur);
 
+    mInitialFrame.mTcw = pKFini->GetPose().clone();
     mCurrentFrame.mTcw = pKFcur->GetPose().clone();
     mLastFrame = Frame(mCurrentFrame);
     mnLastKeyFrameId=mCurrentFrame.mnId;
@@ -678,12 +660,13 @@ bool Tracking::TrackPreviousFrame()
                 mCurrentFrame.mvbOutlier[i]=false;
                 nmatches--;
             }
-
         // Search by projection with the estimated pose
         nmatches += matcher.SearchByProjection(mLastFrame,mCurrentFrame,15,vpMapPointMatches);
     }
-    else //Last opportunity
+    else {
+		//Last opportunity
         nmatches = matcher.SearchByProjection(mLastFrame,mCurrentFrame,50,vpMapPointMatches);
+	}
 
 
     mCurrentFrame.mvpMapPoints=vpMapPointMatches;

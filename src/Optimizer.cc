@@ -65,8 +65,8 @@ class EdgeProjection : public g2o::BaseUnaryEdge<2, Eigen::Vector2d, VertexMapPo
 	void computeError() {
 		const VertexMapPoint* mp = static_cast<const VertexMapPoint*>(vertex(0));
 		Eigen::Vector3d xc = Rcw * mp->estimate() + Tcw;
-		double u = - fx * xc(0) / xc(2);
-		double v = - fy * xc(1) / xc(2);
+		double u = fx * xc(0) / xc(2);
+		double v = fy * xc(1) / xc(2);
 		_error(0) = u - measurement()(0);
 		_error(1) = v - measurement()(1);
 	}
@@ -74,12 +74,12 @@ class EdgeProjection : public g2o::BaseUnaryEdge<2, Eigen::Vector2d, VertexMapPo
 	void linearizeOplus() {
 		const VertexMapPoint* mp = static_cast<const VertexMapPoint*>(vertex(0));
 		Eigen::Vector3d xc = Rcw * mp->estimate() + Tcw;
-		_jacobianOplusXi(0,0) = fx / xc(2) / xc(2) * (Rcw(2,0) * xc(0) - Rcw(0,0) * xc(2));
-		_jacobianOplusXi(0,1) = fx / xc(2) / xc(2) * (Rcw(2,1) * xc(0) - Rcw(0,1) * xc(2));
-		_jacobianOplusXi(0,2) = fx / xc(2) / xc(2) * (Rcw(2,2) * xc(0) - Rcw(0,2) * xc(2));
-		_jacobianOplusXi(1,0) = fy / xc(2) / xc(2) * (Rcw(2,0) * xc(1) - Rcw(1,0) * xc(2));
-		_jacobianOplusXi(1,1) = fy / xc(2) / xc(2) * (Rcw(2,1) * xc(1) - Rcw(1,1) * xc(2));
-		_jacobianOplusXi(1,2) = fy / xc(2) / xc(2) * (Rcw(2,2) * xc(1) - Rcw(1,2) * xc(2));
+		_jacobianOplusXi(0,0) = -fx / xc(2) / xc(2) * (Rcw(2,0) * xc(0) - Rcw(0,0) * xc(2));
+		_jacobianOplusXi(0,1) = -fx / xc(2) / xc(2) * (Rcw(2,1) * xc(0) - Rcw(0,1) * xc(2));
+		_jacobianOplusXi(0,2) = -fx / xc(2) / xc(2) * (Rcw(2,2) * xc(0) - Rcw(0,2) * xc(2));
+		_jacobianOplusXi(1,0) = -fy / xc(2) / xc(2) * (Rcw(2,0) * xc(1) - Rcw(1,0) * xc(2));
+		_jacobianOplusXi(1,1) = -fy / xc(2) / xc(2) * (Rcw(2,1) * xc(1) - Rcw(1,1) * xc(2));
+		_jacobianOplusXi(1,2) = -fy / xc(2) / xc(2) * (Rcw(2,2) * xc(1) - Rcw(1,2) * xc(2));
 	}
 };
 
@@ -109,7 +109,7 @@ void Optimizer::Triangulation(Frame* initialFrame,Frame* currentFrame,vector<int
 		e1->setVertex(0,vt);
 		e1->setMeasurement(Eigen::Vector2d(
 			initialFrame->mvKeysUn[i].pt.x - initialFrame->cx,
-			initialFrame->cy - initialFrame->mvKeysUn[i].pt.y
+			initialFrame->mvKeysUn[i].pt.y - initialFrame->cy
 			));
 		e1->Rcw = Rcw1;
 		e1->Tcw = Tcw1;
@@ -121,7 +121,7 @@ void Optimizer::Triangulation(Frame* initialFrame,Frame* currentFrame,vector<int
 		e2->setVertex(0,vt);
 		e2->setMeasurement(Eigen::Vector2d(
 			currentFrame->mvKeysUn[matches[i]].pt.x - currentFrame->cx,
-			currentFrame->cy - currentFrame->mvKeysUn[matches[i]].pt.y
+			currentFrame->mvKeysUn[matches[i]].pt.y - currentFrame->cy
 			));
 		e2->Rcw = Rcw2;
 		e2->Tcw = Tcw2;
@@ -143,8 +143,8 @@ void Optimizer::Triangulation(Frame* initialFrame,Frame* currentFrame,vector<int
 				leastError = optimizer.activeChi2();
 			}
 		}
-		cv::Mat worldPos = (cv::Mat_<double>(3,1) << bestEstimate(0),bestEstimate(1),bestEstimate(2));
-		vpMP[i]->SetWorldPos(worldPos);
+		cv::Mat worldPos = (cv::Mat_<float>(3,1) << bestEstimate(0),bestEstimate(1),bestEstimate(2));
+		vpMP[i]->SetWorldPos(worldPos.clone());
 	}
 }
 
