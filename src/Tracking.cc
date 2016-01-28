@@ -85,6 +85,20 @@ double poseToOffset(geometry_msgs::PoseStamped p1,geometry_msgs::PoseStamped p2)
 	return sqrt(d);
 }
 
+Eigen::Matrix<double,4,4> poseToTransformation(geometry_msgs::PoseStamped msg) {
+	Eigen::Matrix<double,3,3> Rcl;
+	Eigen::Vector3d tcl;
+	Rcl << 1,0,0,0,0,-1,0,1,0;
+	tcl << 0,-0.25,-0.18;
+	Eigen::Matrix<double,3,3> Rwl = poseToRotation(msg);
+	Eigen::Vector3d twl = poseToTranslation(msg);
+	Eigen::Matrix<double,3,3> Rcw = Rcl * Rwl.transpose();
+	Eigen::Vector3d tcw = - Rcl * Rwl.transpose() * twl + tcl;
+	Eigen::Matrix<double,4,4> Tcw = Eigen::Matrix<double,4,4>::Identity();
+	Tcw.block(0,0,3,3) = Rcw;
+	Tcw.block(0,3,3,1) = tcw;
+	return Tcw;
+}
 
 Tracking::Tracking(ORBVocabulary* pVoc, FramePublisher *pFramePublisher, MapPublisher *pMapPublisher, Map *pMap, string strSettingPath):
     mState(NO_IMAGES_YET), mpORBVocabulary(pVoc), mpFramePublisher(pFramePublisher), mpMapPublisher(pMapPublisher), mpMap(pMap),
@@ -202,6 +216,8 @@ void Tracking::SetKeyFrameDatabase(KeyFrameDatabase *pKFDB)
 
 void pose_callback(const geometry_msgs::PoseStampedConstPtr& poseMsg) {
 	hectorPose_msg = *poseMsg;
+	Eigen::Matrix<double,4,4> Tcw = poseToTransformation(hectorPose_msg);
+	hectorPose = Converter::toCvMat(Tcw);
 	hector_time_cur = poseMsg->header.stamp.toSec();
 }
 
@@ -302,7 +318,16 @@ void Tracking::GrabImage(const sensor_msgs::ImageConstPtr& msg)
         // If tracking were good, check if we insert a keyframe
         if(bOK)
         {
+				
             mpMapPublisher->SetCurrentCameraPose(mCurrentFrame.mTcw);
+			//write to file
+			FILE* orb_pose = fopen("/home/jd/Documents/vslam/orb/orb_pose.txt","a");
+			Eigen::Matrix<double,3,3> R = Converter::toMatrix3d(mCurrentFrame.mTcw.rowRange(0,3).colRange(0,3));
+			Eigen::Quaterniond Q(R);
+			fprintf(orb_pose,"%f %f %f %f %f %f %f %f\n",mCurrentFrame.mTimeStamp,
+				mCurrentFrame.mTcw.at<float>(0,3),mCurrentFrame.mTcw.at<float>(1,3),mCurrentFrame.mTcw.at<float>(2,3),
+				Q.w(),Q.x(),Q.y(),Q.z());
+			fclose(orb_pose);
 
             if(NeedNewKeyFrame())
                 CreateNewKeyFrame();
@@ -463,6 +488,8 @@ void Tracking::CreateInitialMap(cv::Mat &Rcw, cv::Mat &tcw)
 	FILE* pose_stamped = fopen("/home/jd/Documents/vslam/orb/pose_stamped.txt","w");
 	FILE* key_match = fopen("/home/jd/Documents/vslam/orb/key.match","w");
 	FILE* map_point = fopen("/home/jd/Documents/vslam/orb/map_point.txt","w");
+	FILE* orb_pose = fopen("/home/jd/Documents/vslam/orb/orb_pose.txt","w");
+	fclose(orb_pose);
 	fprintf(pose_stamped,"%f %f %f %f %f %f %f %f\n",
 		initialHectorPose_msg.header.stamp.toSec(),
 		initialHectorPose_msg.pose.position.x,
@@ -534,20 +561,10 @@ void Tracking::CreateInitialMap(cv::Mat &Rcw, cv::Mat &tcw)
 		cout << "time_ini " << hector_time_ini << "\n"; 
 		cout << "time_cur " << hector_time_cur << "\n"; 
 
-		Eigen::Matrix<double,3,3> Rcl;
-		Eigen::Vector3d tcl;
-		Rcl << 1,0,0,0,0,-1,0,1,0;
-		tcl << 0,-0.25,-0.18;
-		Eigen::Matrix<double,3,3> Rwl1 = poseToRotation(initialHectorPose_msg);
-		Eigen::Vector3d twl1 = poseToTranslation(initialHectorPose_msg);
-		Eigen::Matrix<double,3,3> Rwl2 = poseToRotation(hectorPose_msg);
-		Eigen::Vector3d twl2 = poseToTranslation(hectorPose_msg);
-		Eigen::Matrix<double,3,3> Rcw1 = Rcl * Rwl1.transpose();
-		Eigen::Vector3d tcw1 = - Rcl * Rwl1.transpose() * twl1 + tcl;
-		Eigen::Matrix<double,3,3> Rcw2 = Rcl * Rwl2.transpose();
-		Eigen::Vector3d tcw2 = - Rcl * Rwl2.transpose() * twl2 + tcl;
+		Eigen::Matrix<double,4,4> Tcw1 = poseToTransformation(initialHectorPose_msg);
+		Eigen::Matrix<double,4,4> Tcw2 = poseToTransformation(hectorPose_msg);
 		vector<MapPoint*> vpAllMapPoints = pKFini->GetMapPointMatches();
-		Optimizer::Triangulation(&mInitialFrame,&mCurrentFrame,mvIniMatches,Rcw1,tcw1,Rcw2,tcw2,vpAllMapPoints);
+		Optimizer::Triangulation(&mInitialFrame,&mCurrentFrame,mvIniMatches,Tcw1,Tcw2,vpAllMapPoints);
 		for(size_t iMP=0; iMP<vpAllMapPoints.size(); iMP++) {
 			if(vpAllMapPoints[iMP]) {
 				MapPoint* pMP = vpAllMapPoints[iMP];
@@ -555,12 +572,6 @@ void Tracking::CreateInitialMap(cv::Mat &Rcw, cv::Mat &tcw)
 				fprintf(map_point,"%f %f %f\n",worldPos.at<float>(0,0),worldPos.at<float>(1,0),worldPos.at<float>(2,0));
 			}
 		}
-		Eigen::Matrix<double,4,4> Tcw1 = Eigen::Matrix<double,4,4>::Identity();
-		Tcw1.block(0,0,3,3) = Rcw1;
-		Tcw1.block(0,3,3,1) = tcw1;
-		Eigen::Matrix<double,4,4> Tcw2 = Eigen::Matrix<double,4,4>::Identity();
-		Tcw2.block(0,0,3,3) = Rcw2;
-		Tcw2.block(0,3,3,1) = tcw2;
 		pKFini->SetPose(Converter::toCvMat(Tcw1));
 		pKFcur->SetPose(Converter::toCvMat(Tcw2));
 		cout << "pKFini " << pKFini->GetPose() << "\n";

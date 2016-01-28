@@ -84,9 +84,12 @@ class EdgeProjection : public g2o::BaseUnaryEdge<2, Eigen::Vector2d, VertexMapPo
 };
 
 void Optimizer::Triangulation(Frame* initialFrame,Frame* currentFrame,vector<int> matches,
-	Eigen::Matrix<double,3,3> Rcw1,Eigen::Vector3d Tcw1,
-	Eigen::Matrix<double,3,3> Rcw2,Eigen::Vector3d Tcw2,
+	Eigen::Matrix<double,4,4> Tcw1, Eigen::Matrix<double,4,4> Tcw2,
 	vector<MapPoint*> vpMP) {
+	Eigen::Matrix<double,3,3> Rcw1 = Tcw1.block(0,0,3,3);
+	Eigen::Vector3d tcw1 = Tcw1.block(0,3,3,1);
+	Eigen::Matrix<double,3,3> Rcw2 = Tcw2.block(0,0,3,3);
+	Eigen::Vector3d tcw2 = Tcw2.block(0,3,3,1);
     for(size_t i=0; i<matches.size();i++) {
         if(matches[i]<0)
             continue;
@@ -112,7 +115,7 @@ void Optimizer::Triangulation(Frame* initialFrame,Frame* currentFrame,vector<int
 			initialFrame->mvKeysUn[i].pt.y - initialFrame->cy
 			));
 		e1->Rcw = Rcw1;
-		e1->Tcw = Tcw1;
+		e1->Tcw = tcw1;
 		e1->fx = initialFrame->fx;
 		e1->fy = initialFrame->fy;
 		optimizer.addEdge(e1);
@@ -124,7 +127,7 @@ void Optimizer::Triangulation(Frame* initialFrame,Frame* currentFrame,vector<int
 			currentFrame->mvKeysUn[matches[i]].pt.y - currentFrame->cy
 			));
 		e2->Rcw = Rcw2;
-		e2->Tcw = Tcw2;
+		e2->Tcw = tcw2;
 		e2->fx = currentFrame->fx;
 		e2->fy = currentFrame->fy;
 		optimizer.addEdge(e2);
@@ -284,8 +287,8 @@ int Optimizer::PoseOptimization(Frame *pFrame,cv::Mat Tcw)
 
     // SET FRAME VERTEX
     g2o::VertexSE3Expmap * vSE3 = new g2o::VertexSE3Expmap();
-    vSE3->setEstimate(Converter::toSE3Quat(pFrame->mTcw));
-//    vSE3->setEstimate(Converter::toSE3Quat(Tcw));
+//    vSE3->setEstimate(Converter::toSE3Quat(pFrame->mTcw));
+    vSE3->setEstimate(Converter::toSE3Quat(Tcw));
     vSE3->setId(0);
     vSE3->setFixed(false);
     optimizer.addVertex(vSE3);
