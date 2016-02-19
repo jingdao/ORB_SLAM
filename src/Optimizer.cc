@@ -90,6 +90,8 @@ void Optimizer::Triangulation(Frame* initialFrame,Frame* currentFrame,vector<int
 	Eigen::Vector3d tcw1 = Tcw1.block(0,3,3,1);
 	Eigen::Matrix<double,3,3> Rcw2 = Tcw2.block(0,0,3,3);
 	Eigen::Vector3d tcw2 = Tcw2.block(0,3,3,1);
+	int numInliers = 0;
+	int numOutliers = 0;
     for(size_t i=0; i<matches.size();i++) {
         if(matches[i]<0)
             continue;
@@ -148,7 +150,16 @@ void Optimizer::Triangulation(Frame* initialFrame,Frame* currentFrame,vector<int
 		}
 		cv::Mat worldPos = (cv::Mat_<float>(3,1) << bestEstimate(0),bestEstimate(1),bestEstimate(2));
 		vpMP[i]->SetWorldPos(worldPos.clone());
+		if (leastError < 10) {
+        	vpMP[i]->UpdateNormalAndDepth();
+			numInliers++;
+		} else {
+//			currentFrame->mvbOutlier[matches[i]]=false;
+//			currentFrame->mvpMapPoints[matches[i]]=NULL;
+			numOutliers++;
+		}
 	}
+	printf("triangulation: %d inliers %d outliers\n",numInliers,numOutliers);
 }
 
 void Optimizer::GlobalBundleAdjustemnt(Map* pMap, int nIterations, bool* pbStopFlag)
@@ -287,8 +298,8 @@ int Optimizer::PoseOptimization(Frame *pFrame,cv::Mat Tcw)
 
     // SET FRAME VERTEX
     g2o::VertexSE3Expmap * vSE3 = new g2o::VertexSE3Expmap();
-//    vSE3->setEstimate(Converter::toSE3Quat(pFrame->mTcw));
-    vSE3->setEstimate(Converter::toSE3Quat(Tcw));
+    vSE3->setEstimate(Converter::toSE3Quat(pFrame->mTcw));
+//    vSE3->setEstimate(Converter::toSE3Quat(Tcw));
     vSE3->setId(0);
     vSE3->setFixed(false);
     optimizer.addVertex(vSE3);
@@ -398,7 +409,120 @@ int Optimizer::PoseOptimization(Frame *pFrame,cv::Mat Tcw)
     g2o::VertexSE3Expmap* vSE3_recov = static_cast<g2o::VertexSE3Expmap*>(optimizer.vertex(0));
     g2o::SE3Quat SE3quat_recov = vSE3_recov->estimate();
     cv::Mat pose = Converter::toCvMat(SE3quat_recov);
+	printf("pose error: %f\n",cv::norm(pose-Tcw));
     pose.copyTo(pFrame->mTcw);
+
+    return nInitialCorrespondences-nBad;
+}
+
+int Optimizer::MapOptimization(Frame *pFrame,cv::Mat Tcw) {    
+    g2o::SparseOptimizer optimizer;
+    g2o::BlockSolverX::LinearSolverType * linearSolver;
+    linearSolver = new g2o::LinearSolverDense<g2o::BlockSolverX::PoseMatrixType>();
+    g2o::BlockSolverX * solver_ptr = new g2o::BlockSolverX(linearSolver);
+    g2o::OptimizationAlgorithmLevenberg* solver = new g2o::OptimizationAlgorithmLevenberg(solver_ptr);
+    optimizer.setAlgorithm(solver);
+    optimizer.setVerbose(false);
+    int nInitialCorrespondences=0;
+
+    // SET FRAME VERTEX
+    g2o::VertexSE3Expmap * vSE3 = new g2o::VertexSE3Expmap();
+    vSE3->setEstimate(Converter::toSE3Quat(Tcw));
+    vSE3->setId(0);
+    vSE3->setFixed(true);
+    optimizer.addVertex(vSE3);
+
+    // SET MAP POINT VERTICES
+    vector<g2o::EdgeSE3ProjectXYZ*> vpEdges;
+    vector<g2o::VertexSBAPointXYZ*> vVertices;
+    vector<float> vInvSigmas2;
+    vector<size_t> vnIndexEdge;
+
+    const int N = pFrame->mvpMapPoints.size();
+    vpEdges.reserve(N);
+    vVertices.reserve(N);
+    vInvSigmas2.reserve(N);
+    vnIndexEdge.reserve(N);
+    const float delta = sqrt(5.991);
+
+    for(int i=0; i<N; i++) {
+        MapPoint* pMP = pFrame->mvpMapPoints[i];
+        if(pMP) {
+            g2o::VertexSBAPointXYZ* vPoint = new g2o::VertexSBAPointXYZ();
+            vPoint->setEstimate(Converter::toVector3d(pMP->GetWorldPos()));
+            vPoint->setId(i+1);
+            vPoint->setFixed(false);
+            optimizer.addVertex(vPoint);
+            vVertices.push_back(vPoint);
+            nInitialCorrespondences++;
+            pFrame->mvbOutlier[i] = false;
+
+            //SET EDGE
+            Eigen::Matrix<double,2,1> obs;
+            cv::KeyPoint kpUn = pFrame->mvKeysUn[i];
+            obs << kpUn.pt.x, kpUn.pt.y;
+            g2o::EdgeSE3ProjectXYZ* e = new g2o::EdgeSE3ProjectXYZ();
+            e->setVertex(0, dynamic_cast<g2o::OptimizableGraph::Vertex*>(optimizer.vertex(i+1)));
+            e->setVertex(1, dynamic_cast<g2o::OptimizableGraph::Vertex*>(optimizer.vertex(0)));
+            e->setMeasurement(obs);
+            const float invSigma2 = pFrame->mvInvLevelSigma2[kpUn.octave];
+            e->setInformation(Eigen::Matrix2d::Identity()*invSigma2);
+            g2o::RobustKernelHuber* rk = new g2o::RobustKernelHuber;
+            e->setRobustKernel(rk);
+            rk->setDelta(delta);
+            e->fx = pFrame->fx;
+            e->fy = pFrame->fy;
+            e->cx = pFrame->cx;
+            e->cy = pFrame->cy;
+            e->setLevel(0);
+            optimizer.addEdge(e);
+            vpEdges.push_back(e);
+            vInvSigmas2.push_back(invSigma2);
+            vnIndexEdge.push_back(i);
+        }
+    }
+
+    // We perform 4 optimizations, decreasing the inlier region
+    // From second to final optimization we include only inliers in the optimization
+    // At the end of each optimization we check which points are inliers
+    const float chi2[4]={9.210,7.378,5.991,5.991};
+    const int its[4]={10,10,7,5};
+    int nBad=0;
+    for(size_t it=0; it<4; it++) {
+        optimizer.initializeOptimization(0);
+        optimizer.optimize(its[it]);
+        nBad=0;
+		double RMSE=0;
+        for(size_t i=0, iend=vpEdges.size(); i<iend; i++) {
+            g2o::EdgeSE3ProjectXYZ* e = vpEdges[i];
+            const size_t idx = vnIndexEdge[i];
+            if(pFrame->mvbOutlier[idx])
+                e->computeError();
+			RMSE += e->chi2();
+            if(e->chi2()>chi2[it]) {                
+                pFrame->mvbOutlier[idx]=true;
+                e->setLevel(1);
+                nBad++;
+            }
+            else if(e->chi2()<=chi2[it]) {
+                pFrame->mvbOutlier[idx]=false;
+                e->setLevel(0);
+            }
+        }
+		RMSE = sqrt(RMSE / vpEdges.size());
+		printf("nBad: %d RMSE: %f\n",nBad,RMSE);
+        if(optimizer.edges().size()<10)
+            break;
+    }
+
+	for (size_t i=0;i<vVertices.size();i++) {
+		g2o::VertexSBAPointXYZ* vPoint = vVertices[i];
+		if (!pFrame->mvbOutlier[vPoint->id()-1]) {
+			cv::Mat est = Converter::toCvMat(vPoint->estimate());
+			pFrame->mvpMapPoints[vPoint->id()-1]->SetWorldPos(est.clone());
+			pFrame->mvpMapPoints[vPoint->id()-1]->UpdateNormalAndDepth();
+		}
+	}
 
     return nInitialCorrespondences-nBad;
 }

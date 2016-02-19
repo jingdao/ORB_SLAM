@@ -42,7 +42,9 @@ geometry_msgs::PoseStamped hectorPose_msg;
 cv::Mat hectorPose = cv::Mat::eye(4,4,CV_32F);
 double hector_time_cur=0,hector_time_ini=0;
 bool wait_hector = false;
-double minOffset = 0.01;
+bool use_homography = false;
+bool hack_pose = true;
+double minOffset = 0.1;
 cv::Mat Rcw; // Current Camera Rotation
 cv::Mat tcw; // Current Camera Translation
 using namespace std;
@@ -232,6 +234,12 @@ void Tracking::Run()
 
 void Tracking::GrabImage(const sensor_msgs::ImageConstPtr& msg)
 {
+	//discard image if not synced with hector update
+	if (msg->header.stamp.toSec() > hector_time_cur + 0.1) {
+//		printf("discard %f %f\n",msg->header.stamp.toSec(),hector_time_cur);
+		usleep(100000);
+		return;
+	}
 	if (wait_hector) {
 		if (poseToOffset(initialHectorPose_msg,hectorPose_msg) > minOffset) {
 			wait_hector = false;
@@ -307,7 +315,8 @@ void Tracking::GrabImage(const sensor_msgs::ImageConstPtr& msg)
         }
         else
         {
-            bOK = Relocalisation();
+//            bOK = Relocalisation();
+			bOK = false;
         }
 
         // If we have an initial estimation of the camera pose and matching. Track the local map.
@@ -445,23 +454,32 @@ void Tracking::Initialize()
 //    cv::Mat tcw; // Current Camera Translation
     vector<bool> vbTriangulated; // Triangulated Correspondences (mvIniMatches)
 
-    if(mpInitializer->Initialize(mCurrentFrame, mvIniMatches, Rcw, tcw, mvIniP3D, vbTriangulated))
-    {
-        for(size_t i=0, iend=mvIniMatches.size(); i<iend;i++)
-        {
-            if(mvIniMatches[i]>=0 && !vbTriangulated[i])
-            {
-                mvIniMatches[i]=-1;
-                nmatches--;
-            }           
-        }
+	if (use_homography) {
+		if(mpInitializer->Initialize(mCurrentFrame, mvIniMatches, Rcw, tcw, mvIniP3D, vbTriangulated))
+		{
+			for(size_t i=0, iend=mvIniMatches.size(); i<iend;i++)
+			{
+				if(mvIniMatches[i]>=0 && !vbTriangulated[i])
+				{
+					mvIniMatches[i]=-1;
+					nmatches--;
+				}           
+			}
 
+			if (poseToOffset(initialHectorPose_msg,hectorPose_msg) > minOffset) {
+				CreateInitialMap(Rcw,tcw);
+			} else {
+				wait_hector = true;
+			}
+		}
+	} else {
 		if (poseToOffset(initialHectorPose_msg,hectorPose_msg) > minOffset) {
 			CreateInitialMap(Rcw,tcw);
 		} else {
 			wait_hector = true;
 		}
-    }
+
+	}
 
 }
 
@@ -470,8 +488,10 @@ void Tracking::CreateInitialMap(cv::Mat &Rcw, cv::Mat &tcw)
     // Set Frame Poses
     mInitialFrame.mTcw = cv::Mat::eye(4,4,CV_32F);
     mCurrentFrame.mTcw = cv::Mat::eye(4,4,CV_32F);
-    Rcw.copyTo(mCurrentFrame.mTcw.rowRange(0,3).colRange(0,3));
-    tcw.copyTo(mCurrentFrame.mTcw.rowRange(0,3).col(3));
+	if (!hack_pose) {
+		Rcw.copyTo(mCurrentFrame.mTcw.rowRange(0,3).colRange(0,3));
+		tcw.copyTo(mCurrentFrame.mTcw.rowRange(0,3).col(3));
+	}
 
     // Create KeyFrames
     KeyFrame* pKFini = new KeyFrame(mInitialFrame,mpMap,mpKeyFrameDB);
@@ -522,10 +542,15 @@ void Tracking::CreateInitialMap(cv::Mat &Rcw, cv::Mat &tcw)
 			mCurrentFrame.mvKeysUn[mvIniMatches[i]].pt.x,mCurrentFrame.mvKeysUn[mvIniMatches[i]].pt.y);
 
         //Create MapPoint.
-        cv::Mat worldPos(mvIniP3D[i]);
+		MapPoint* pMP;
+		if (hack_pose) {
+			cv::Mat worldPos(cv::Point3f(0,0,0));
+			pMP = new MapPoint(worldPos,pKFcur,mpMap);
+		} else {
+			cv::Mat worldPos(mvIniP3D[i]);
+			pMP = new MapPoint(worldPos,pKFcur,mpMap);
+		}
 //		printf("%f %f %f\n",worldPos.at<float>(0,0),worldPos.at<float>(1,0),worldPos.at<float>(2,0));
-
-        MapPoint* pMP = new MapPoint(worldPos,pKFcur,mpMap);
 
         pKFini->AddMapPoint(pMP,i);
         pKFcur->AddMapPoint(pMP,mvIniMatches[i]);
@@ -553,13 +578,12 @@ void Tracking::CreateInitialMap(cv::Mat &Rcw, cv::Mat &tcw)
 
     Optimizer::GlobalBundleAdjustemnt(mpMap,20);
 
-	bool hack_pose = true;
 	if (hack_pose) {
 		cout << "time_ini " << mInitialFrame.mTimeStamp << "\n"; 
 		cout << "time_cur " << mCurrentFrame.mTimeStamp << "\n"; 
-		cout << "pKFcur " << pKFcur->GetPose() << "\n";
 		cout << "time_ini " << hector_time_ini << "\n"; 
 		cout << "time_cur " << hector_time_cur << "\n"; 
+		cout << "pKFcur " << pKFcur->GetPose() << "\n";
 
 		Eigen::Matrix<double,4,4> Tcw1 = poseToTransformation(initialHectorPose_msg);
 		Eigen::Matrix<double,4,4> Tcw2 = poseToTransformation(hectorPose_msg);
@@ -643,6 +667,7 @@ bool Tracking::TrackPreviousFrame()
         minOctave = maxOctave/2+1;
 
     int nmatches = matcher.WindowSearch(mLastFrame,mCurrentFrame,200,vpMapPointMatches,minOctave);
+	int initialMatches = nmatches;
 
     // If not enough matches, search again without scale constraint
     if(nmatches<10)
@@ -662,6 +687,7 @@ bool Tracking::TrackPreviousFrame()
     if(nmatches>=10)
     {
         // Optimize pose with correspondences
+//		printf("first optimization\n");
         Optimizer::PoseOptimization(&mCurrentFrame,hectorPose);
 
         for(size_t i =0; i<mCurrentFrame.mvbOutlier.size(); i++)
@@ -686,6 +712,7 @@ bool Tracking::TrackPreviousFrame()
         return false;
 
     // Optimize pose again with all correspondences
+//	printf("second optimization\n");
     Optimizer::PoseOptimization(&mCurrentFrame,hectorPose);
 
     // Discard outliers
@@ -697,6 +724,7 @@ bool Tracking::TrackPreviousFrame()
             nmatches--;
         }
 
+	printf("track previous frame: %d %d\n",initialMatches,nmatches);
     return nmatches>=10;
 }
 
@@ -712,11 +740,13 @@ bool Tracking::TrackWithMotionModel()
 
     // Project points seen in previous frame
     int nmatches = matcher.SearchByProjection(mCurrentFrame,mLastFrame,15);
+	int initialMatches = nmatches;
 
     if(nmatches<20)
        return false;
 
     // Optimize pose with all correspondences
+//	printf("timestamps: %f %f\n",mCurrentFrame.mTimeStamp,hector_time_cur);
     Optimizer::PoseOptimization(&mCurrentFrame,hectorPose);
 
     // Discard outliers
@@ -732,7 +762,7 @@ bool Tracking::TrackWithMotionModel()
             }
         }
     }
-
+	printf("track with motion model: %d %d\n",initialMatches,nmatches);
     return nmatches>=10;
 }
 
@@ -750,6 +780,7 @@ bool Tracking::TrackLocalMap()
 
     // Optimize Pose
     mnMatchesInliers = Optimizer::PoseOptimization(&mCurrentFrame,hectorPose);
+	printf("track local map: %d\n",mnMatchesInliers);
 
     // Update MapPoints Statistics
     for(size_t i=0; i<mCurrentFrame.mvpMapPoints.size(); i++)
