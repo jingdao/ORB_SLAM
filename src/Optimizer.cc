@@ -83,6 +83,23 @@ class EdgeProjection : public g2o::BaseUnaryEdge<2, Eigen::Vector2d, VertexMapPo
 	}
 };
 
+class EdgeMapPoint: public g2o::BaseUnaryEdge<3,Eigen::Vector3d, g2o::VertexSBAPointXYZ> {
+	public:
+	EIGEN_MAKE_ALIGNED_OPERATOR_NEW;
+	EdgeMapPoint() {}
+	virtual bool read(std::istream& /*is*/) {return false;}
+	virtual bool write(std::ostream& /*os*/) const {return false;}
+
+	void computeError() {
+		const g2o::VertexSBAPointXYZ* v = static_cast<const g2o::VertexSBAPointXYZ*>(vertex(0));
+		_error = v->estimate() - measurement();
+	}
+
+	void linearizeOplus() {
+		_jacobianOplusXi = Eigen::Matrix<double,3,3>::Identity();
+	}
+};
+
 void Optimizer::Triangulation(Frame* initialFrame,Frame* currentFrame,vector<int> matches,
 	Eigen::Matrix<double,4,4> Tcw1, Eigen::Matrix<double,4,4> Tcw2,
 	vector<MapPoint*> vpMP) {
@@ -409,7 +426,8 @@ int Optimizer::PoseOptimization(Frame *pFrame,cv::Mat Tcw)
     g2o::VertexSE3Expmap* vSE3_recov = static_cast<g2o::VertexSE3Expmap*>(optimizer.vertex(0));
     g2o::SE3Quat SE3quat_recov = vSE3_recov->estimate();
     cv::Mat pose = Converter::toCvMat(SE3quat_recov);
-	printf("pose error: %f\n",cv::norm(pose-Tcw));
+	if (Tracking::debug_optimizer)
+		printf("pose error: %f\n",cv::norm(pose.col(3)-Tcw.col(3)));
     pose.copyTo(pFrame->mTcw);
 
     return nInitialCorrespondences-nBad;
@@ -429,10 +447,11 @@ int Optimizer::MapOptimization(Frame *pFrame,cv::Mat Tcw) {
     g2o::VertexSE3Expmap * vSE3 = new g2o::VertexSE3Expmap();
     vSE3->setEstimate(Converter::toSE3Quat(Tcw));
     vSE3->setId(0);
-    vSE3->setFixed(true);
+    vSE3->setFixed(Tracking::optim_fix_pose);
     optimizer.addVertex(vSE3);
 
     // SET MAP POINT VERTICES
+	vector<EdgeMapPoint*> mapEdges;
     vector<g2o::EdgeSE3ProjectXYZ*> vpEdges;
     vector<g2o::VertexSBAPointXYZ*> vVertices;
     vector<float> vInvSigmas2;
@@ -456,6 +475,16 @@ int Optimizer::MapOptimization(Frame *pFrame,cv::Mat Tcw) {
             vVertices.push_back(vPoint);
             nInitialCorrespondences++;
             pFrame->mvbOutlier[i] = false;
+
+			EdgeMapPoint* emp = new EdgeMapPoint();
+			emp->setVertex(0,vPoint);
+			emp->setMeasurement(vPoint->estimate());
+            emp->setInformation(Eigen::Matrix3d::Identity());
+            g2o::RobustKernelHuber* rkh = new g2o::RobustKernelHuber;
+            emp->setRobustKernel(rkh);
+            rkh->setDelta(delta);
+			mapEdges.push_back(emp);
+			optimizer.addEdge(emp);
 
             //SET EDGE
             Eigen::Matrix<double,2,1> obs;
@@ -488,11 +517,12 @@ int Optimizer::MapOptimization(Frame *pFrame,cv::Mat Tcw) {
     const float chi2[4]={9.210,7.378,5.991,5.991};
     const int its[4]={10,10,7,5};
     int nBad=0;
+	double RMSE=0;
     for(size_t it=0; it<4; it++) {
         optimizer.initializeOptimization(0);
         optimizer.optimize(its[it]);
         nBad=0;
-		double RMSE=0;
+		RMSE=0;
         for(size_t i=0, iend=vpEdges.size(); i<iend; i++) {
             g2o::EdgeSE3ProjectXYZ* e = vpEdges[i];
             const size_t idx = vnIndexEdge[i];
@@ -510,10 +540,16 @@ int Optimizer::MapOptimization(Frame *pFrame,cv::Mat Tcw) {
             }
         }
 		RMSE = sqrt(RMSE / vpEdges.size());
-		printf("nBad: %d RMSE: %f\n",nBad,RMSE);
+//		printf("nBad: %d RMSE: %f\n",nBad,RMSE);
         if(optimizer.edges().size()<10)
             break;
     }
+
+	double map_error=0;
+	for (size_t i=0;i<mapEdges.size();i++) {
+		map_error += mapEdges[i]->chi2();
+	}
+	map_error = sqrt(map_error / mapEdges.size());
 
 	for (size_t i=0;i<vVertices.size();i++) {
 		g2o::VertexSBAPointXYZ* vPoint = vVertices[i];
@@ -523,6 +559,13 @@ int Optimizer::MapOptimization(Frame *pFrame,cv::Mat Tcw) {
 			pFrame->mvpMapPoints[vPoint->id()-1]->UpdateNormalAndDepth();
 		}
 	}
+
+    g2o::VertexSE3Expmap* vSE3_recov = static_cast<g2o::VertexSE3Expmap*>(optimizer.vertex(0));
+    g2o::SE3Quat SE3quat_recov = vSE3_recov->estimate();
+    cv::Mat pose = Converter::toCvMat(SE3quat_recov);
+	if (Tracking::debug_optimizer)
+		printf("MapOptimization (pose %f proj %f map %f)\n",cv::norm(pose.col(3)-Tcw.col(3)),RMSE,map_error);
+    pose.copyTo(pFrame->mTcw);
 
     return nInitialCorrespondences-nBad;
 }

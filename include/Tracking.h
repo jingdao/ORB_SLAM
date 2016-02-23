@@ -63,6 +63,17 @@ public:
         LOST=4
     };
 
+	static bool use_homography;
+	static bool hack_pose;
+	static bool debug_tracking;
+	static bool debug_optimizer;
+	static bool optim_fix_map;
+	static bool optim_fix_pose;
+	static bool save_initial_map;
+	static bool minimal_build;
+	static double minOffset;
+	static double tracking_threshold;
+	static double tracking_threshold_local;
     void SetLocalMapper(LocalMapping* pLocalMapper);
     void SetLoopClosing(LoopClosing* pLoopClosing);
     void SetKeyFrameDatabase(KeyFrameDatabase* pKFDB);

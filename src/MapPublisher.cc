@@ -36,7 +36,7 @@ MapPublisher::MapPublisher(Map* pMap):mpMap(pMap), mbCameraUpdated(false)
     const char* CAMERA_NAMESPACE = "Camera";
 
     //Configure MapPoints
-    fPointSize=0.01;
+    fPointSize=0.05;
     mPoints.header.frame_id = MAP_FRAME_ID;
     mPoints.ns = POINTS_NAMESPACE;
     mPoints.id=0;

@@ -41,11 +41,43 @@
 
 using namespace std;
 
+	void loadParams() {
+		FILE* params = fopen("/home/jd/Documents/vslam/orb/tracking_params.txt","r");
+		if (params) {
+			char buffer[128];
+			while (fgets(buffer,128,params)) {
+				if (strncmp(buffer,"use_homography",14)==0)
+					ORB_SLAM::Tracking::use_homography = atoi(buffer+15);
+				else if (strncmp(buffer,"hack_pose",9)==0)
+					ORB_SLAM::Tracking::hack_pose = atoi(buffer+10);
+				else if (strncmp(buffer,"debug_tracking",14)==0)
+					ORB_SLAM::Tracking::debug_tracking = atoi(buffer+15);
+				else if (strncmp(buffer,"debug_optimizer",15)==0)
+					ORB_SLAM::Tracking::debug_optimizer = atoi(buffer+16);
+				else if (strncmp(buffer,"optim_fix_map",13)==0)
+					ORB_SLAM::Tracking::optim_fix_map = atoi(buffer+14);
+				else if (strncmp(buffer,"optim_fix_pose",14)==0)
+					ORB_SLAM::Tracking::optim_fix_pose = atoi(buffer+15);
+				else if (strncmp(buffer,"save_initial_map",16)==0)
+					ORB_SLAM::Tracking::save_initial_map = atoi(buffer+17);
+				else if (strncmp(buffer,"minimal_build",13)==0)
+					ORB_SLAM::Tracking::minimal_build = atof(buffer+14);
+				else if (strncmp(buffer,"minOffset",9)==0)
+					ORB_SLAM::Tracking::minOffset = atof(buffer+10);
+				else if (strncmp(buffer,"tracking_threshold",18)==0)
+					ORB_SLAM::Tracking::tracking_threshold = atof(buffer+19);
+				else if (strncmp(buffer,"tracking_threshold_local",24)==0)
+					ORB_SLAM::Tracking::tracking_threshold_local = atof(buffer+25);
+			}
+		}
+		fclose(params);
+	}
 
 int main(int argc, char **argv)
 {
     ros::init(argc, argv, "ORB_SLAM");
     ros::start();
+	loadParams();
 
     cout << endl << "ORB-SLAM Copyright (C) 2014 Raul Mur-Artal" << endl <<
             "This program comes with ABSOLUTELY NO WARRANTY;" << endl  <<
@@ -131,17 +163,18 @@ int main(int argc, char **argv)
 
     //Initialize the Loop Closing Thread and launch
     ORB_SLAM::LoopClosing LoopCloser(&World, &Database, &Vocabulary);
-    boost::thread loopClosingThread(&ORB_SLAM::LoopClosing::Run, &LoopCloser);
+	if (!ORB_SLAM::Tracking::minimal_build) {
+		boost::thread loopClosingThread(&ORB_SLAM::LoopClosing::Run, &LoopCloser);
+	}
+    LoopCloser.SetTracker(&Tracker);
+    LoopCloser.SetLocalMapper(&LocalMapper);
 
     //Set pointers between threads
     Tracker.SetLocalMapper(&LocalMapper);
     Tracker.SetLoopClosing(&LoopCloser);
-
     LocalMapper.SetTracker(&Tracker);
     LocalMapper.SetLoopCloser(&LoopCloser);
 
-    LoopCloser.SetTracker(&Tracker);
-    LoopCloser.SetLocalMapper(&LocalMapper);
 
     //This "main" thread will show the current processed frame and publish the map
     float fps = fsSettings["Camera.fps"];
@@ -153,7 +186,8 @@ int main(int argc, char **argv)
     while (ros::ok())
     {
         FramePub.Refresh();
-        MapPub.Refresh();
+		if (!ORB_SLAM::Tracking::minimal_build)
+			MapPub.Refresh();
         Tracker.CheckResetByPublishers();
         r.sleep();
     }
