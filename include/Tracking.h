@@ -69,6 +69,7 @@ public:
 	static bool debug_optimizer;
 	static bool optim_fix_map;
 	static bool optim_fix_pose;
+	static bool optim_adjust_scale;
 	static bool save_initial_map;
 	static bool minimal_build;
 	static double minOffset;

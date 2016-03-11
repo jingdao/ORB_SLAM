@@ -39,7 +39,7 @@ class Optimizer
 public:
 	void static Triangulation(Frame* initialFrame,Frame* currentFrame,vector<int> matches,
 		Eigen::Matrix<double,4,4> Tcw1, Eigen::Matrix<double,4,4> Tcw2,
-		vector<MapPoint*> vpMP);
+		vector<cv::Point3f> *vp3d, vector<Eigen::Vector3d> *scan);
     void static BundleAdjustment(const std::vector<KeyFrame*> &vpKF, const std::vector<MapPoint*> &vpMP, int nIterations = 5, bool *pbStopFlag=NULL);
     void static GlobalBundleAdjustemnt(Map* pMap, int nIterations=5, bool *pbStopFlag=NULL);
     void static LocalBundleAdjustment(KeyFrame* pKF, bool *pbStopFlag=NULL);

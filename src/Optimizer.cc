@@ -102,13 +102,18 @@ class EdgeMapPoint: public g2o::BaseUnaryEdge<3,Eigen::Vector3d, g2o::VertexSBAP
 
 void Optimizer::Triangulation(Frame* initialFrame,Frame* currentFrame,vector<int> matches,
 	Eigen::Matrix<double,4,4> Tcw1, Eigen::Matrix<double,4,4> Tcw2,
-	vector<MapPoint*> vpMP) {
+    vector<cv::Point3f> *vp3d, vector<Eigen::Vector3d> *scan) {
 	Eigen::Matrix<double,3,3> Rcw1 = Tcw1.block(0,0,3,3);
 	Eigen::Vector3d tcw1 = Tcw1.block(0,3,3,1);
 	Eigen::Matrix<double,3,3> Rcw2 = Tcw2.block(0,0,3,3);
 	Eigen::Vector3d tcw2 = Tcw2.block(0,3,3,1);
 	int numInliers = 0;
 	int numOutliers = 0;
+	std::vector<Eigen::Vector3d> map_position;
+	map_position.resize(matches.size());
+	vp3d->resize(matches.size());
+	std::vector<double> map_error;
+	map_error.resize(matches.size());
     for(size_t i=0; i<matches.size();i++) {
         if(matches[i]<0)
             continue;
@@ -165,18 +170,48 @@ void Optimizer::Triangulation(Frame* initialFrame,Frame* currentFrame,vector<int
 				leastError = optimizer.activeChi2();
 			}
 		}
-		cv::Mat worldPos = (cv::Mat_<float>(3,1) << bestEstimate(0),bestEstimate(1),bestEstimate(2));
-		vpMP[i]->SetWorldPos(worldPos.clone());
-		if (leastError < 10) {
-        	vpMP[i]->UpdateNormalAndDepth();
-			numInliers++;
-		} else {
-//			currentFrame->mvbOutlier[matches[i]]=false;
-//			currentFrame->mvpMapPoints[matches[i]]=NULL;
-			numOutliers++;
+		map_position[i] = bestEstimate;
+		map_error[i] = leastError;
+	}
+	if (scan->size() > 0) {
+		Eigen::Vector3d midpoint = map_position[0];
+		for (size_t i=1;i<map_position.size();i++) {
+			if (fabs(map_position[i](2)) < fabs(midpoint(2)))
+				midpoint = map_position[i];
+		}
+		Eigen::Vector3d mc = Rcw1 * midpoint + tcw1;
+		Eigen::Vector3d ref = Rcw1 * (*scan)[0] + tcw1;
+		double minAngle = mc.cross(ref).norm() / ref.norm();
+		for (size_t j=1;j<scan->size();j++) {
+			Eigen::Vector3d rc = Rcw1 * (*scan)[j] + tcw1;
+			double angle = mc.cross(rc).norm() / rc.norm();
+			if (angle < minAngle) {
+				ref = rc;
+				minAngle = angle;
+			}
+		}
+		double scale = ref.norm() / mc.norm();
+		for (size_t i=0;i<map_position.size();i++) {
+			Eigen::Vector3d xc = Rcw1 * map_position[i] + tcw1;
+			xc *= scale;
+			map_position[i] = Rcw1.transpose() * (xc - tcw1); 
+		}
+		if (Tracking::debug_optimizer)
+			printf("triangulation: fixed scale by %f\n",scale);
+	}
+	for (size_t i=0;i<matches.size();i++) {
+		if (matches[i] >= 0) {
+			(*vp3d)[i] = cv::Point3f(map_position[i](0),map_position[i](1),map_position[i](2));
+			if (map_error[i] < 10) {
+				numInliers++;
+			} else {
+				matches[i] = -1;
+				numOutliers++;
+			}
 		}
 	}
-	printf("triangulation: %d inliers %d outliers\n",numInliers,numOutliers);
+	if (Tracking::debug_optimizer)
+		printf("triangulation: %d inliers %d outliers\n",numInliers,numOutliers);
 }
 
 void Optimizer::GlobalBundleAdjustemnt(Map* pMap, int nIterations, bool* pbStopFlag)

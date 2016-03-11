@@ -36,9 +36,13 @@
 #include<iostream>
 #include<fstream>
 #include <geometry_msgs/PoseStamped.h>
+#include <sensor_msgs/Imu.h>
+#include <sensor_msgs/PointCloud.h>
 
+ros::Subscriber subLidar;
 geometry_msgs::PoseStamped initialHectorPose_msg;
 geometry_msgs::PoseStamped hectorPose_msg;
+sensor_msgs::PointCloud hectorCloud_msg;
 cv::Mat hectorPose = cv::Mat::eye(4,4,CV_32F);
 double hector_time_cur=0,hector_time_ini=0;
 bool wait_hector = false;
@@ -48,6 +52,7 @@ bool ORB_SLAM::Tracking::debug_tracking = false;
 bool ORB_SLAM::Tracking::debug_optimizer = false;
 bool ORB_SLAM::Tracking::optim_fix_map = false;
 bool ORB_SLAM::Tracking::optim_fix_pose = true;
+bool ORB_SLAM::Tracking::optim_adjust_scale = false;
 bool ORB_SLAM::Tracking::save_initial_map = false;
 bool ORB_SLAM::Tracking::minimal_build = false;
 double ORB_SLAM::Tracking::minOffset = 0.1;
@@ -115,6 +120,22 @@ void pose_callback(const geometry_msgs::PoseStampedConstPtr& poseMsg) {
 	Eigen::Matrix<double,4,4> Tcw = poseToTransformation(hectorPose_msg);
 	hectorPose = Converter::toCvMat(Tcw);
 	hector_time_cur = poseMsg->header.stamp.toSec();
+}
+
+void imu_callback(const sensor_msgs::Imu::ConstPtr& imuMsg) {
+	double t = imuMsg->header.stamp.toSec();
+	double gx = imuMsg->angular_velocity.x;
+	double gy = imuMsg->angular_velocity.y;
+	double gz = imuMsg->angular_velocity.z;
+	double ax = imuMsg->linear_acceleration.x;
+	double ay = imuMsg->linear_acceleration.y;
+	double az = imuMsg->linear_acceleration.z;
+//	printf("%.3f %.3f %.3f %.3f %.3f %.3f %.3f\n",t,gx,gy,gz,ax,ay,az);
+}
+
+void cloud_callback(const sensor_msgs::PointCloudConstPtr& lidarMsg) {
+	hectorCloud_msg = *lidarMsg;
+	subLidar.shutdown();
 }
 
 Tracking::Tracking(ORBVocabulary* pVoc, FramePublisher *pFramePublisher, MapPublisher *pMapPublisher, Map *pMap, string strSettingPath):
@@ -236,6 +257,8 @@ void Tracking::Run()
     ros::NodeHandle nodeHandler;
     ros::Subscriber sub = nodeHandler.subscribe("/camera/image_raw", 1, &Tracking::GrabImage, this);
 	ros::Subscriber subPose = nodeHandler.subscribe("/slam_out_pose",1,pose_callback);
+	ros::Subscriber subImu = nodeHandler.subscribe("/asctec_proc/imu",1,imu_callback);
+	subLidar = nodeHandler.subscribe("/slam_cloud",1,cloud_callback);
 
     ros::spin();
 }
@@ -440,7 +463,7 @@ void Tracking::Initialize()
         fill(mvIniMatches.begin(),mvIniMatches.end(),-1);
         mState = NOT_INITIALIZED;
         return;
-    }    
+    }   
 
     // Find correspondences
     ORBmatcher matcher(0.9,true);
@@ -497,13 +520,32 @@ void Tracking::CreateInitialMap(cv::Mat &Rcw, cv::Mat &tcw)
     mpMap->AddKeyFrame(pKFini);
     mpMap->AddKeyFrame(pKFcur);
 
+	//linearly interpolate pose
+	double x1 = initialHectorPose_msg.pose.position.x;
+	double y1 = initialHectorPose_msg.pose.position.y;
+	double z1 = initialHectorPose_msg.pose.position.z;
+	double x2 = hectorPose_msg.pose.position.x;
+	double y2 = hectorPose_msg.pose.position.y;
+	double z2 = hectorPose_msg.pose.position.z;
+	double t1 = initialHectorPose_msg.header.stamp.toSec(); 
+	double t2 = hectorPose_msg.header.stamp.toSec(); 
+	double ti = mInitialFrame.mTimeStamp;
+	double tf = mCurrentFrame.mTimeStamp;
+	initialHectorPose_msg.pose.position.x = (x1*(t2-ti) + x2*(ti-t1)) / (t2-t1);
+	initialHectorPose_msg.pose.position.y = (y1*(t2-ti) + y2*(ti-t1)) / (t2-t1);
+	initialHectorPose_msg.pose.position.z = (z1*(t2-ti) + z2*(ti-t1)) / (t2-t1);
+	hectorPose_msg.pose.position.x = (x1*(t2-tf) + x2*(tf-t1)) / (t2-t1);
+	hectorPose_msg.pose.position.y = (y1*(t2-tf) + y2*(tf-t1)) / (t2-t1);
+	hectorPose_msg.pose.position.z = (z1*(t2-tf) + z2*(tf-t1)) / (t2-t1);
+
 	//Write to pose file
-	FILE* pose_stamped,*key_match,*map_point,*orb_pose;
+	FILE* pose_stamped,*key_match,*map_point,*orb_pose,*lidar_map;
 	if (save_initial_map) {
 		pose_stamped = fopen("/home/jd/Documents/vslam/orb/pose_stamped.txt","w");
 		key_match = fopen("/home/jd/Documents/vslam/orb/key.match","w");
 		map_point = fopen("/home/jd/Documents/vslam/orb/map_point.txt","w");
 		orb_pose = fopen("/home/jd/Documents/vslam/orb/orb_pose.txt","w");
+		lidar_map = fopen("/home/jd/Documents/vslam/orb/lidar_map.txt","w");
 		fclose(orb_pose);
 		fprintf(pose_stamped,"%f %f %f %f %f %f %f %f\n",
 			initialHectorPose_msg.header.stamp.toSec(),
@@ -523,57 +565,12 @@ void Tracking::CreateInitialMap(cv::Mat &Rcw, cv::Mat &tcw)
 			hectorPose_msg.pose.orientation.x,
 			hectorPose_msg.pose.orientation.y,
 			hectorPose_msg.pose.orientation.z);
+		for (unsigned int i=0; i<hectorCloud_msg.points.size(); i++) {
+			fprintf(lidar_map,"%f %f %f\n",hectorCloud_msg.points[i].x,hectorCloud_msg.points[i].y,0.0);
+		}
+		fclose(lidar_map);
 		fclose(pose_stamped);
 	}
-
-    // Create MapPoints and asscoiate to keyframes
-    for(size_t i=0; i<mvIniMatches.size();i++)
-    {
-        if(mvIniMatches[i]<0)
-            continue;
-
-		//write to match file
-		if (save_initial_map) {
-			fprintf(key_match,"0 %f %f 1 %f %f\n",
-				mInitialFrame.mvKeysUn[i].pt.x,mInitialFrame.mvKeysUn[i].pt.y,
-				mCurrentFrame.mvKeysUn[mvIniMatches[i]].pt.x,mCurrentFrame.mvKeysUn[mvIniMatches[i]].pt.y);
-		}
-
-        //Create MapPoint.
-		MapPoint* pMP;
-		if (Tracking::hack_pose) {
-			cv::Mat worldPos(cv::Point3f(0,0,0));
-			pMP = new MapPoint(worldPos,pKFcur,mpMap);
-		} else {
-			cv::Mat worldPos(mvIniP3D[i]);
-			pMP = new MapPoint(worldPos,pKFcur,mpMap);
-		}
-
-        pKFini->AddMapPoint(pMP,i);
-        pKFcur->AddMapPoint(pMP,mvIniMatches[i]);
-
-        pMP->AddObservation(pKFini,i);
-        pMP->AddObservation(pKFcur,mvIniMatches[i]);
-
-        pMP->ComputeDistinctiveDescriptors();
-        pMP->UpdateNormalAndDepth();
-
-        //Fill Current Frame structure
-        mCurrentFrame.mvpMapPoints[mvIniMatches[i]] = pMP;
-
-        //Add to Map
-        mpMap->AddMapPoint(pMP);
-
-    }
-
-    // Update Connections
-    pKFini->UpdateConnections();
-    pKFcur->UpdateConnections();
-
-    // Bundle Adjustment
-    ROS_INFO("New Map created with %d points (%lu matches)",mpMap->MapPointsInMap(),mvIniMatches.size());
-
-    Optimizer::GlobalBundleAdjustemnt(mpMap,20);
 
 	if (Tracking::hack_pose) {
 		cout << "time_ini " << mInitialFrame.mTimeStamp << "\n"; 
@@ -584,14 +581,17 @@ void Tracking::CreateInitialMap(cv::Mat &Rcw, cv::Mat &tcw)
 
 		Eigen::Matrix<double,4,4> Tcw1 = poseToTransformation(initialHectorPose_msg);
 		Eigen::Matrix<double,4,4> Tcw2 = poseToTransformation(hectorPose_msg);
-		vector<MapPoint*> vpAllMapPoints = pKFini->GetMapPointMatches();
-		Optimizer::Triangulation(&mInitialFrame,&mCurrentFrame,mvIniMatches,Tcw1,Tcw2,vpAllMapPoints);
-		for(size_t iMP=0; iMP<vpAllMapPoints.size(); iMP++) {
-			if(vpAllMapPoints[iMP]) {
-				MapPoint* pMP = vpAllMapPoints[iMP];
-				cv::Mat worldPos = pMP->GetWorldPos();
+		vector<Eigen::Vector3d> scan;
+		if (Tracking::optim_adjust_scale) {
+			for (size_t i=0;i<hectorCloud_msg.points.size();i++)
+				scan.push_back(Eigen::Vector3d(hectorCloud_msg.points[i].x,hectorCloud_msg.points[i].y,hectorCloud_msg.points[i].z));
+		}
+		Optimizer::Triangulation(&mInitialFrame,&mCurrentFrame,mvIniMatches,Tcw1,Tcw2,&mvIniP3D,&scan);
+		for(size_t i=0; i<mvIniMatches.size();i++) {
+			if(mvIniMatches[i]>=0) {
+				cv::Point3f worldPos = mvIniP3D[i];
 				if (save_initial_map) {
-					fprintf(map_point,"%f %f %f\n",worldPos.at<float>(0,0),worldPos.at<float>(1,0),worldPos.at<float>(2,0));
+					fprintf(map_point,"%f %f %f\n",worldPos.x,worldPos.y,worldPos.z);
 				}
 			}
 		}
@@ -599,7 +599,70 @@ void Tracking::CreateInitialMap(cv::Mat &Rcw, cv::Mat &tcw)
 		pKFcur->SetPose(Converter::toCvMat(Tcw2));
 		cout << "pKFini " << pKFini->GetPose() << "\n";
 		cout << "pKFcur " << pKFcur->GetPose() << "\n";
+
+		// Create MapPoints and asscoiate to keyframes
+		for(size_t i=0; i<mvIniMatches.size();i++) {
+			if(mvIniMatches[i]<0)
+				continue;
+			//write to match file
+			if (save_initial_map) {
+				fprintf(key_match,"0 %f %f 1 %f %f\n",
+					mInitialFrame.mvKeysUn[i].pt.x,mInitialFrame.mvKeysUn[i].pt.y,
+					mCurrentFrame.mvKeysUn[mvIniMatches[i]].pt.x,mCurrentFrame.mvKeysUn[mvIniMatches[i]].pt.y);
+			}
+			//Create MapPoint.
+			cv::Mat worldPos(mvIniP3D[i]);
+			MapPoint* pMP = new MapPoint(worldPos,pKFcur,mpMap);
+			pKFini->AddMapPoint(pMP,i);
+			pKFcur->AddMapPoint(pMP,mvIniMatches[i]);
+			pMP->AddObservation(pKFini,i);
+			pMP->AddObservation(pKFcur,mvIniMatches[i]);
+			pMP->ComputeDistinctiveDescriptors();
+			pMP->UpdateNormalAndDepth();
+			//Fill Current Frame structure
+			mCurrentFrame.mvpMapPoints[mvIniMatches[i]] = pMP;
+			//Add to Map
+			mpMap->AddMapPoint(pMP);
+		}
+		// Update Connections
+		pKFini->UpdateConnections();
+		pKFcur->UpdateConnections();
+		// Bundle Adjustment
+		ROS_INFO("New Map created with %d points (%lu matches)",mpMap->MapPointsInMap(),mvIniMatches.size());
+		Optimizer::GlobalBundleAdjustemnt(mpMap,20);
+
 	} else {
+		// Create MapPoints and asscoiate to keyframes
+		for(size_t i=0; i<mvIniMatches.size();i++) {
+			if(mvIniMatches[i]<0)
+				continue;
+			//write to match file
+			if (save_initial_map) {
+				fprintf(key_match,"0 %f %f 1 %f %f\n",
+					mInitialFrame.mvKeysUn[i].pt.x,mInitialFrame.mvKeysUn[i].pt.y,
+					mCurrentFrame.mvKeysUn[mvIniMatches[i]].pt.x,mCurrentFrame.mvKeysUn[mvIniMatches[i]].pt.y);
+			}
+			//Create MapPoint.
+			cv::Mat worldPos(mvIniP3D[i]);
+			MapPoint* pMP = new MapPoint(worldPos,pKFcur,mpMap);
+			pKFini->AddMapPoint(pMP,i);
+			pKFcur->AddMapPoint(pMP,mvIniMatches[i]);
+			pMP->AddObservation(pKFini,i);
+			pMP->AddObservation(pKFcur,mvIniMatches[i]);
+			pMP->ComputeDistinctiveDescriptors();
+			pMP->UpdateNormalAndDepth();
+			//Fill Current Frame structure
+			mCurrentFrame.mvpMapPoints[mvIniMatches[i]] = pMP;
+			//Add to Map
+			mpMap->AddMapPoint(pMP);
+		}
+		// Update Connections
+		pKFini->UpdateConnections();
+		pKFcur->UpdateConnections();
+		// Bundle Adjustment
+		ROS_INFO("New Map created with %d points (%lu matches)",mpMap->MapPointsInMap(),mvIniMatches.size());
+		Optimizer::GlobalBundleAdjustemnt(mpMap,20);
+
 		// Set median depth to 1
 		float medianDepth = pKFini->ComputeSceneMedianDepth(2);
 		float invMedianDepth = 1.0f/medianDepth;

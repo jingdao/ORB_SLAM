@@ -58,6 +58,8 @@ using namespace std;
 					ORB_SLAM::Tracking::optim_fix_map = atoi(buffer+14);
 				else if (strncmp(buffer,"optim_fix_pose",14)==0)
 					ORB_SLAM::Tracking::optim_fix_pose = atoi(buffer+15);
+				else if (strncmp(buffer,"optim_adjust_scale",18)==0)
+					ORB_SLAM::Tracking::optim_fix_pose = atoi(buffer+19);
 				else if (strncmp(buffer,"save_initial_map",16)==0)
 					ORB_SLAM::Tracking::save_initial_map = atoi(buffer+17);
 				else if (strncmp(buffer,"minimal_build",13)==0)
