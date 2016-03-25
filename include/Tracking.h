@@ -36,6 +36,7 @@
 #include"ORBextractor.h"
 #include "Initializer.h"
 #include "MapPublisher.h"
+#include<Eigen/Dense>
 
 #include<tf/transform_broadcaster.h>
 
@@ -75,6 +76,7 @@ public:
 	static double minOffset;
 	static double tracking_threshold;
 	static double tracking_threshold_local;
+	static Eigen::Vector3d tcl;
     void SetLocalMapper(LocalMapping* pLocalMapper);
     void SetLoopClosing(LoopClosing* pLoopClosing);
     void SetKeyFrameDatabase(KeyFrameDatabase* pKFDB);

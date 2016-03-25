@@ -70,6 +70,13 @@ using namespace std;
 					ORB_SLAM::Tracking::tracking_threshold = atof(buffer+19);
 				else if (strncmp(buffer,"tracking_threshold_local",24)==0)
 					ORB_SLAM::Tracking::tracking_threshold_local = atof(buffer+25);
+				else if (strncmp(buffer,"tcl",3)==0) {
+					char* c = buffer + 3;
+					double x = strtod(c,&c);
+					double y = strtod(c,&c);
+					double z = strtod(c,&c);
+					ORB_SLAM::Tracking::tcl << x,y,z;
+				}
 			}
 		}
 		fclose(params);

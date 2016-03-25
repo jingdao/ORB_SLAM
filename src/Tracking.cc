@@ -58,6 +58,7 @@ bool ORB_SLAM::Tracking::minimal_build = false;
 double ORB_SLAM::Tracking::minOffset = 0.1;
 double ORB_SLAM::Tracking::tracking_threshold = 10;
 double ORB_SLAM::Tracking::tracking_threshold_local = 30;
+Eigen::Vector3d ORB_SLAM::Tracking::tcl(0,0,0);
 cv::Mat Rcw; // Current Camera Rotation
 cv::Mat tcw; // Current Camera Translation
 using namespace std;
@@ -102,13 +103,13 @@ double poseToOffset(geometry_msgs::PoseStamped p1,geometry_msgs::PoseStamped p2)
 
 Eigen::Matrix<double,4,4> poseToTransformation(geometry_msgs::PoseStamped msg) {
 	Eigen::Matrix<double,3,3> Rcl;
-	Eigen::Vector3d tcl;
+//	Eigen::Vector3d tcl;
 	Rcl << 1,0,0,0,0,-1,0,1,0;
-	tcl << 0,-0.25,-0.18;
+//	tcl << 0,-0.25,-0.18;
 	Eigen::Matrix<double,3,3> Rwl = poseToRotation(msg);
 	Eigen::Vector3d twl = poseToTranslation(msg);
 	Eigen::Matrix<double,3,3> Rcw = Rcl * Rwl.transpose();
-	Eigen::Vector3d tcw = - Rcl * Rwl.transpose() * twl + tcl;
+	Eigen::Vector3d tcw = - Rcl * Rwl.transpose() * twl + Tracking::tcl;
 	Eigen::Matrix<double,4,4> Tcw = Eigen::Matrix<double,4,4>::Identity();
 	Tcw.block(0,0,3,3) = Rcw;
 	Tcw.block(0,3,3,1) = tcw;
@@ -266,12 +267,12 @@ void Tracking::Run()
 void Tracking::GrabImage(const sensor_msgs::ImageConstPtr& msg)
 {
 	//discard image if not synced with hector update
-//	if (msg->header.stamp.toSec() > hector_time_cur + 0.1) {
-//		if (debug_tracking)
-//			printf("discard %f %f\n",msg->header.stamp.toSec(),hector_time_cur);
-//		usleep(100000);
-//		return;
-//	}
+	if (msg->header.stamp.toSec() > hector_time_cur + 0.1) {
+		if (debug_tracking)
+			printf("discard %f %f\n",msg->header.stamp.toSec(),hector_time_cur);
+		usleep(100000);
+		return;
+	}
     cv::Mat im;
 
     // Copy the ros image message to cv::Mat. Convert to grayscale if it is a color image.
@@ -586,15 +587,7 @@ void Tracking::CreateInitialMap(cv::Mat &Rcw, cv::Mat &tcw)
 			for (size_t i=0;i<hectorCloud_msg.points.size();i++)
 				scan.push_back(Eigen::Vector3d(hectorCloud_msg.points[i].x,hectorCloud_msg.points[i].y,hectorCloud_msg.points[i].z));
 		}
-		Optimizer::Triangulation(&mInitialFrame,&mCurrentFrame,mvIniMatches,Tcw1,Tcw2,&mvIniP3D,&scan);
-		for(size_t i=0; i<mvIniMatches.size();i++) {
-			if(mvIniMatches[i]>=0) {
-				cv::Point3f worldPos = mvIniP3D[i];
-				if (save_initial_map) {
-					fprintf(map_point,"%f %f %f\n",worldPos.x,worldPos.y,worldPos.z);
-				}
-			}
-		}
+		Optimizer::Triangulation(&mInitialFrame,&mCurrentFrame,&mvIniMatches,Tcw1,Tcw2,&mvIniP3D,&scan);
 		pKFini->SetPose(Converter::toCvMat(Tcw1));
 		pKFcur->SetPose(Converter::toCvMat(Tcw2));
 		cout << "pKFini " << pKFini->GetPose() << "\n";
@@ -606,6 +599,8 @@ void Tracking::CreateInitialMap(cv::Mat &Rcw, cv::Mat &tcw)
 				continue;
 			//write to match file
 			if (save_initial_map) {
+				cv::Point3f worldPos = mvIniP3D[i];
+				fprintf(map_point,"%f %f %f\n",worldPos.x,worldPos.y,worldPos.z);
 				fprintf(key_match,"0 %f %f 1 %f %f\n",
 					mInitialFrame.mvKeysUn[i].pt.x,mInitialFrame.mvKeysUn[i].pt.y,
 					mCurrentFrame.mvKeysUn[mvIniMatches[i]].pt.x,mCurrentFrame.mvKeysUn[mvIniMatches[i]].pt.y);
@@ -623,6 +618,32 @@ void Tracking::CreateInitialMap(cv::Mat &Rcw, cv::Mat &tcw)
 			mCurrentFrame.mvpMapPoints[mvIniMatches[i]] = pMP;
 			//Add to Map
 			mpMap->AddMapPoint(pMP);
+		}
+		if (save_initial_map) {
+			cv::Mat im1 = mInitialFrame.im.clone();
+			cv::Mat im2 = mCurrentFrame.im.clone();
+			cv::cvtColor(im1,im1,CV_GRAY2BGR);
+			cv::cvtColor(im2,im2,CV_GRAY2BGR);
+			const float r = 5;
+			cv::Point2f pt1,pt2;
+			for (size_t i=0;i<mvIniMatches.size();i++) {
+				if (mvIniMatches[i] >= 0) {
+					pt1.x=mInitialFrame.mvKeysUn[i].pt.x-r;
+					pt1.y=mInitialFrame.mvKeysUn[i].pt.y-r;
+					pt2.x=mInitialFrame.mvKeysUn[i].pt.x+r;
+					pt2.y=mInitialFrame.mvKeysUn[i].pt.y+r;
+					cv::rectangle(im1,pt1,pt2,cv::Scalar(0,255,0));
+					cv::circle(im1,mInitialFrame.mvKeysUn[i].pt,2,cv::Scalar(0,255,0),-1);
+					pt1.x=mCurrentFrame.mvKeysUn[mvIniMatches[i]].pt.x-r;
+					pt1.y=mCurrentFrame.mvKeysUn[mvIniMatches[i]].pt.y-r;
+					pt2.x=mCurrentFrame.mvKeysUn[mvIniMatches[i]].pt.x+r;
+					pt2.y=mCurrentFrame.mvKeysUn[mvIniMatches[i]].pt.y+r;
+					cv::rectangle(im2,pt1,pt2,cv::Scalar(0,255,0));
+					cv::circle(im2,mCurrentFrame.mvKeysUn[mvIniMatches[i]].pt,2,cv::Scalar(0,255,0),-1);
+				}
+			}
+			cv::imwrite("/home/jd/Documents/vslam/orb/initial_frame.jpg",im1);
+			cv::imwrite("/home/jd/Documents/vslam/orb/current_frame.jpg",im2);
 		}
 		// Update Connections
 		pKFini->UpdateConnections();

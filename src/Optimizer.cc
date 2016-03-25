@@ -100,7 +100,7 @@ class EdgeMapPoint: public g2o::BaseUnaryEdge<3,Eigen::Vector3d, g2o::VertexSBAP
 	}
 };
 
-void Optimizer::Triangulation(Frame* initialFrame,Frame* currentFrame,vector<int> matches,
+void Optimizer::Triangulation(Frame* initialFrame,Frame* currentFrame,vector<int> *matches,
 	Eigen::Matrix<double,4,4> Tcw1, Eigen::Matrix<double,4,4> Tcw2,
     vector<cv::Point3f> *vp3d, vector<Eigen::Vector3d> *scan) {
 	Eigen::Matrix<double,3,3> Rcw1 = Tcw1.block(0,0,3,3);
@@ -110,12 +110,12 @@ void Optimizer::Triangulation(Frame* initialFrame,Frame* currentFrame,vector<int
 	int numInliers = 0;
 	int numOutliers = 0;
 	std::vector<Eigen::Vector3d> map_position;
-	map_position.resize(matches.size());
-	vp3d->resize(matches.size());
+	map_position.resize(matches->size());
+	vp3d->resize(matches->size());
 	std::vector<double> map_error;
-	map_error.resize(matches.size());
-    for(size_t i=0; i<matches.size();i++) {
-        if(matches[i]<0)
+	map_error.resize(matches->size());
+    for(size_t i=0; i<matches->size();i++) {
+        if((*matches)[i]<0)
             continue;
 		//initialize solver
 		g2o::SparseOptimizer optimizer;
@@ -147,8 +147,8 @@ void Optimizer::Triangulation(Frame* initialFrame,Frame* currentFrame,vector<int
 		e2->setInformation(Eigen::Matrix<double,2,2>::Identity());
 		e2->setVertex(0,vt);
 		e2->setMeasurement(Eigen::Vector2d(
-			currentFrame->mvKeysUn[matches[i]].pt.x - currentFrame->cx,
-			currentFrame->mvKeysUn[matches[i]].pt.y - currentFrame->cy
+			currentFrame->mvKeysUn[(*matches)[i]].pt.x - currentFrame->cx,
+			currentFrame->mvKeysUn[(*matches)[i]].pt.y - currentFrame->cy
 			));
 		e2->Rcw = Rcw2;
 		e2->Tcw = tcw2;
@@ -199,13 +199,13 @@ void Optimizer::Triangulation(Frame* initialFrame,Frame* currentFrame,vector<int
 		if (Tracking::debug_optimizer)
 			printf("triangulation: fixed scale by %f\n",scale);
 	}
-	for (size_t i=0;i<matches.size();i++) {
-		if (matches[i] >= 0) {
+	for (size_t i=0;i<matches->size();i++) {
+		if ((*matches)[i] >= 0) {
 			(*vp3d)[i] = cv::Point3f(map_position[i](0),map_position[i](1),map_position[i](2));
 			if (map_error[i] < 10) {
 				numInliers++;
 			} else {
-				matches[i] = -1;
+				(*matches)[i] = -1;
 				numOutliers++;
 			}
 		}
