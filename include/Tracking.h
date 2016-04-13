@@ -73,6 +73,7 @@ public:
 	static bool optim_adjust_scale;
 	static bool save_initial_map;
 	static bool minimal_build;
+	static bool use_imu;
 	static double minOffset;
 	static double tracking_threshold;
 	static double tracking_threshold_local;

@@ -44,6 +44,8 @@ geometry_msgs::PoseStamped initialHectorPose_msg;
 geometry_msgs::PoseStamped hectorPose_msg;
 sensor_msgs::PointCloud hectorCloud_msg;
 cv::Mat hectorPose = cv::Mat::eye(4,4,CV_32F);
+double imu_time = 0;
+Eigen::Quaternionf imu_pose;
 double hector_time_cur=0,hector_time_ini=0;
 bool wait_hector = false;
 bool ORB_SLAM::Tracking::use_homography = false;
@@ -55,6 +57,7 @@ bool ORB_SLAM::Tracking::optim_fix_pose = true;
 bool ORB_SLAM::Tracking::optim_adjust_scale = false;
 bool ORB_SLAM::Tracking::save_initial_map = false;
 bool ORB_SLAM::Tracking::minimal_build = false;
+bool ORB_SLAM::Tracking::use_imu = false;
 double ORB_SLAM::Tracking::minOffset = 0.1;
 double ORB_SLAM::Tracking::tracking_threshold = 10;
 double ORB_SLAM::Tracking::tracking_threshold_local = 30;
@@ -116,6 +119,91 @@ Eigen::Matrix<double,4,4> poseToTransformation(geometry_msgs::PoseStamped msg) {
 	return Tcw;
 }
 
+static float invSqrt(float x) {
+	float xhalf = 0.5f * x;
+	union {
+		float x;
+		int i;
+	} u;
+	u.x = x;
+	u.i = 0x5f3759df - (u.i >> 1);
+	/* The next line can be repeated any number of times to increase accuracy */
+	u.x = u.x * (1.5f - xhalf * u.x * u.x);
+	return u.x;
+}
+
+Eigen::Quaternionf madgwickAHRSupdateIMU(Eigen::Quaternionf q, float gx, float gy, float gz, float ax, float ay, float az, float dt) {
+	float recipNorm;
+	float s0, s1, s2, s3;
+	float qDot1, qDot2, qDot3, qDot4;
+	float _2q0, _2q1, _2q2, _2q3, _4q0, _4q1, _4q2 ,_8q1, _8q2, q0q0, q1q1, q2q2, q3q3;
+	float q0 = q.w(), q1 = q.x(), q2 = q.y(), q3 = q.z();
+
+	// Rate of change of quaternion from gyroscope
+	qDot1 = 0.5f * (-q1 * gx - q2 * gy - q3 * gz);
+	qDot2 = 0.5f * ( q0 * gx + q2 * gz - q3 * gy);
+	qDot3 = 0.5f * ( q0 * gy - q1 * gz + q3 * gx);
+	qDot4 = 0.5f * ( q0 * gz + q1 * gy - q2 * gx);
+
+	// Compute feedback only if accelerometer measurement valid (avoids NaN in accelerometer normalisation)
+	if(!((ax == 0.0f) && (ay == 0.0f) && (az == 0.0f))) 
+  {
+		// Normalise accelerometer measurement
+		recipNorm = invSqrt(ax * ax + ay * ay + az * az);
+		ax *= recipNorm;
+		ay *= recipNorm;
+		az *= recipNorm;   
+
+		// Auxiliary variables to avoid repeated arithmetic
+		_2q0 = 2.0f * q0;
+		_2q1 = 2.0f * q1;
+		_2q2 = 2.0f * q2;
+		_2q3 = 2.0f * q3;
+		_4q0 = 4.0f * q0;
+		_4q1 = 4.0f * q1;
+		_4q2 = 4.0f * q2;
+		_8q1 = 8.0f * q1;
+		_8q2 = 8.0f * q2;
+		q0q0 = q0 * q0;
+		q1q1 = q1 * q1;
+		q2q2 = q2 * q2;
+		q3q3 = q3 * q3;
+
+		// Gradient decent algorithm corrective step
+		s0 = _4q0 * q2q2 + _2q2 * ax + _4q0 * q1q1 - _2q1 * ay;
+		s1 = _4q1 * q3q3 - _2q3 * ax + 4.0f * q0q0 * q1 - _2q0 * ay - _4q1 + _8q1 * q1q1 + _8q1 * q2q2 + _4q1 * az;
+		s2 = 4.0f * q0q0 * q2 + _2q0 * ax + _4q2 * q3q3 - _2q3 * ay - _4q2 + _8q2 * q1q1 + _8q2 * q2q2 + _4q2 * az;
+		s3 = 4.0f * q1q1 * q3 - _2q1 * ax + 4.0f * q2q2 * q3 - _2q2 * ay;
+		recipNorm = invSqrt(s0 * s0 + s1 * s1 + s2 * s2 + s3 * s3); // normalise step magnitude
+		s0 *= recipNorm;
+		s1 *= recipNorm;
+		s2 *= recipNorm;
+		s3 *= recipNorm;
+
+		// Apply feedback step
+		float gain = 0.1;
+		qDot1 -= gain * s0;
+		qDot2 -= gain * s1;
+		qDot3 -= gain * s2;
+		qDot4 -= gain * s3;
+	}
+
+	// Integrate rate of change of quaternion to yield quaternion
+	q0 += qDot1 * dt;
+	q1 += qDot2 * dt;
+	q2 += qDot3 * dt;
+	q3 += qDot4 * dt;
+
+	// Normalise quaternion
+	recipNorm = invSqrt(q0 * q0 + q1 * q1 + q2 * q2 + q3 * q3);
+	q0 *= recipNorm;
+	q1 *= recipNorm;
+	q2 *= recipNorm;
+	q3 *= recipNorm;
+
+	return Eigen::Quaternionf(q0,q1,q2,q3);
+}
+
 void pose_callback(const geometry_msgs::PoseStampedConstPtr& poseMsg) {
 	hectorPose_msg = *poseMsg;
 	Eigen::Matrix<double,4,4> Tcw = poseToTransformation(hectorPose_msg);
@@ -131,7 +219,18 @@ void imu_callback(const sensor_msgs::Imu::ConstPtr& imuMsg) {
 	double ax = imuMsg->linear_acceleration.x;
 	double ay = imuMsg->linear_acceleration.y;
 	double az = imuMsg->linear_acceleration.z;
-//	printf("%.3f %.3f %.3f %.3f %.3f %.3f %.3f\n",t,gx,gy,gz,ax,ay,az);
+	if (imu_time > 0) {
+		imu_pose = madgwickAHRSupdateIMU(imu_pose,gx,gy,gz,ax,ay,az,t-imu_time);
+	} else {
+		double sign = az <0 ? -1 : 1;
+		double roll = atan2(ay, sign * sqrt(ax*ax + az*az));
+		double pitch = -atan2(ax, sqrt(ay*ay + az*az));
+		float q0 = cos(roll/2) * cos(pitch/2);
+		float q1 = sin(roll/2) * cos(pitch/2);
+		float q2 = cos(roll/2) * sin(pitch/2);
+		imu_pose = Eigen::Quaternionf(q0,q1,q2,0);
+	}
+	imu_time = t;
 }
 
 void cloud_callback(const sensor_msgs::PointCloudConstPtr& lidarMsg) {
@@ -258,7 +357,8 @@ void Tracking::Run()
     ros::NodeHandle nodeHandler;
     ros::Subscriber sub = nodeHandler.subscribe("/camera/image_raw", 1, &Tracking::GrabImage, this);
 	ros::Subscriber subPose = nodeHandler.subscribe("/slam_out_pose",1,pose_callback);
-	ros::Subscriber subImu = nodeHandler.subscribe("/asctec_proc/imu",1,imu_callback);
+	if (use_imu)
+		ros::Subscriber subImu = nodeHandler.subscribe("/asctec_proc/imu",1,imu_callback);
 	subLidar = nodeHandler.subscribe("/slam_cloud",1,cloud_callback);
 
     ros::spin();
@@ -540,10 +640,11 @@ void Tracking::CreateInitialMap(cv::Mat &Rcw, cv::Mat &tcw)
 	hectorPose_msg.pose.position.z = (z1*(t2-tf) + z2*(tf-t1)) / (t2-t1);
 
 	//Write to pose file
-	FILE* pose_stamped,*key_match,*map_point,*orb_pose,*lidar_map;
+	FILE* pose_stamped,*key_match,*cvkey_match,*map_point,*orb_pose,*lidar_map;
 	if (save_initial_map) {
 		pose_stamped = fopen("/home/jd/Documents/vslam/orb/pose_stamped.txt","w");
 		key_match = fopen("/home/jd/Documents/vslam/orb/key.match","w");
+		cvkey_match = fopen("/home/jd/Documents/vslam/orb/cvkey.match","w");
 		map_point = fopen("/home/jd/Documents/vslam/orb/map_point.txt","w");
 		orb_pose = fopen("/home/jd/Documents/vslam/orb/orb_pose.txt","w");
 		lidar_map = fopen("/home/jd/Documents/vslam/orb/lidar_map.txt","w");
@@ -604,6 +705,9 @@ void Tracking::CreateInitialMap(cv::Mat &Rcw, cv::Mat &tcw)
 				fprintf(key_match,"0 %f %f 1 %f %f\n",
 					mInitialFrame.mvKeysUn[i].pt.x,mInitialFrame.mvKeysUn[i].pt.y,
 					mCurrentFrame.mvKeysUn[mvIniMatches[i]].pt.x,mCurrentFrame.mvKeysUn[mvIniMatches[i]].pt.y);
+				fprintf(cvkey_match,"%f %f %d %f %f %d\n",
+					mInitialFrame.mvKeysUn[i].pt.x,mInitialFrame.mvKeysUn[i].pt.y,mInitialFrame.mvKeysUn[i].octave,
+					mCurrentFrame.mvKeysUn[mvIniMatches[i]].pt.x,mCurrentFrame.mvKeysUn[mvIniMatches[i]].pt.y,mCurrentFrame.mvKeysUn[mvIniMatches[i]].octave);
 			}
 			//Create MapPoint.
 			cv::Mat worldPos(mvIniP3D[i]);
@@ -650,7 +754,7 @@ void Tracking::CreateInitialMap(cv::Mat &Rcw, cv::Mat &tcw)
 		pKFcur->UpdateConnections();
 		// Bundle Adjustment
 		ROS_INFO("New Map created with %d points (%lu matches)",mpMap->MapPointsInMap(),mvIniMatches.size());
-		Optimizer::GlobalBundleAdjustemnt(mpMap,20);
+//		Optimizer::GlobalBundleAdjustemnt(mpMap,20);
 
 	} else {
 		// Create MapPoints and asscoiate to keyframes
@@ -717,6 +821,7 @@ void Tracking::CreateInitialMap(cv::Mat &Rcw, cv::Mat &tcw)
 	}
 	if (save_initial_map) {
 		fclose(key_match);
+		fclose(cvkey_match);
 		fclose(map_point);
 	}
 

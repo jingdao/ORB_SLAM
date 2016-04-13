@@ -64,6 +64,8 @@ using namespace std;
 					ORB_SLAM::Tracking::save_initial_map = atoi(buffer+17);
 				else if (strncmp(buffer,"minimal_build",13)==0)
 					ORB_SLAM::Tracking::minimal_build = atof(buffer+14);
+				else if (strncmp(buffer,"use_imu",7)==0)
+					ORB_SLAM::Tracking::use_imu = atof(buffer+8);
 				else if (strncmp(buffer,"minOffset",9)==0)
 					ORB_SLAM::Tracking::minOffset = atof(buffer+10);
 				else if (strncmp(buffer,"tracking_threshold",18)==0)
