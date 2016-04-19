@@ -44,8 +44,9 @@ geometry_msgs::PoseStamped initialHectorPose_msg;
 geometry_msgs::PoseStamped hectorPose_msg;
 sensor_msgs::PointCloud hectorCloud_msg;
 cv::Mat hectorPose = cv::Mat::eye(4,4,CV_32F);
+cv::Mat imuPose = cv::Mat::eye(4,4,CV_32F);
 double imu_time = 0;
-Eigen::Quaternionf imu_pose;
+Eigen::Quaternionf imu_quat;
 double hector_time_cur=0,hector_time_ini=0;
 bool wait_hector = false;
 bool ORB_SLAM::Tracking::use_homography = false;
@@ -57,7 +58,8 @@ bool ORB_SLAM::Tracking::optim_fix_pose = true;
 bool ORB_SLAM::Tracking::optim_adjust_scale = false;
 bool ORB_SLAM::Tracking::save_initial_map = false;
 bool ORB_SLAM::Tracking::minimal_build = false;
-bool ORB_SLAM::Tracking::use_imu = false;
+double ORB_SLAM::Tracking::imu_errscale = 0;
+double ORB_SLAM::Tracking::lidar_errscale = 0;
 double ORB_SLAM::Tracking::minOffset = 0.1;
 double ORB_SLAM::Tracking::tracking_threshold = 10;
 double ORB_SLAM::Tracking::tracking_threshold_local = 30;
@@ -117,6 +119,28 @@ Eigen::Matrix<double,4,4> poseToTransformation(geometry_msgs::PoseStamped msg) {
 	Tcw.block(0,0,3,3) = Rcw;
 	Tcw.block(0,3,3,1) = tcw;
 	return Tcw;
+}
+
+Eigen::Matrix<double,4,4> quatToMatrix(Eigen::Quaternionf q) {
+	Eigen::Matrix<double,4,4> T = Eigen::Matrix<double,4,4>::Identity();
+	float qx = q.x();
+	float qy = q.y();
+	float qz = q.z();
+	float qw = q.w();
+	Eigen::Matrix<double,3,3> Rwl;
+	Rwl << 1 - 2*qy*qy - 2 * qz*qz,
+	2*qx*qy - 2 * qz*qw,
+	2*qx*qz + 2 * qy*qw,
+	2*qx*qy + 2 * qz*qw,
+	1 - 2*qx*qx - 2 * qz*qz,
+	2*qy*qz - 2 * qx*qw,
+	2*qx*qz - 2 * qy*qw,
+	2*qy*qz + 2 * qx*qw,
+	1 - 2*qx*qx - 2 * qy*qy;
+	Eigen::Matrix<double,3,3> Rcl;
+	Rcl << 1,0,0,0,0,-1,0,1,0;
+	T.block(0,0,3,3) = Rcl * Rwl.transpose();
+	return T;
 }
 
 static float invSqrt(float x) {
@@ -220,17 +244,14 @@ void imu_callback(const sensor_msgs::Imu::ConstPtr& imuMsg) {
 	double ay = imuMsg->linear_acceleration.y;
 	double az = imuMsg->linear_acceleration.z;
 	if (imu_time > 0) {
-		imu_pose = madgwickAHRSupdateIMU(imu_pose,gx,gy,gz,ax,ay,az,t-imu_time);
-	} else {
-		double sign = az <0 ? -1 : 1;
-		double roll = atan2(ay, sign * sqrt(ax*ax + az*az));
-		double pitch = -atan2(ax, sqrt(ay*ay + az*az));
-		float q0 = cos(roll/2) * cos(pitch/2);
-		float q1 = sin(roll/2) * cos(pitch/2);
-		float q2 = cos(roll/2) * sin(pitch/2);
-		imu_pose = Eigen::Quaternionf(q0,q1,q2,0);
+		imu_quat = madgwickAHRSupdateIMU(imu_quat,gx,gy,gz,ax,ay,az,t-imu_time);
+		imuPose = Converter::toCvMat(quatToMatrix(imu_quat));
+		imu_time = t;
+	} else if (hector_time_cur > 0) {
+		geometry_msgs::PoseStamped msg = hectorPose_msg;
+		imu_quat = Eigen::Quaternionf(msg.pose.orientation.w,msg.pose.orientation.x,msg.pose.orientation.y,msg.pose.orientation.z);
+		imu_time = t;
 	}
-	imu_time = t;
 }
 
 void cloud_callback(const sensor_msgs::PointCloudConstPtr& lidarMsg) {
@@ -357,8 +378,9 @@ void Tracking::Run()
     ros::NodeHandle nodeHandler;
     ros::Subscriber sub = nodeHandler.subscribe("/camera/image_raw", 1, &Tracking::GrabImage, this);
 	ros::Subscriber subPose = nodeHandler.subscribe("/slam_out_pose",1,pose_callback);
-	if (use_imu)
-		ros::Subscriber subImu = nodeHandler.subscribe("/asctec_proc/imu",1,imu_callback);
+	ros::Subscriber subImu;
+	if (imu_errscale > 0)
+		subImu = nodeHandler.subscribe("/asctec_proc/imu",1,imu_callback);
 	subLidar = nodeHandler.subscribe("/slam_cloud",1,cloud_callback);
 
     ros::spin();
@@ -880,7 +902,7 @@ bool Tracking::TrackPreviousFrame()
     {
         // Optimize pose with correspondences
 		if (optim_fix_map)
-        	Optimizer::PoseOptimization(&mCurrentFrame,hectorPose);
+        	Optimizer::PoseOptimization(&mCurrentFrame,hectorPose,imuPose);
 		else
         	Optimizer::MapOptimization(&mCurrentFrame,hectorPose);
 
@@ -907,7 +929,7 @@ bool Tracking::TrackPreviousFrame()
 
     // Optimize pose again with all correspondences
 	if (optim_fix_map)
-    	Optimizer::PoseOptimization(&mCurrentFrame,hectorPose);
+    	Optimizer::PoseOptimization(&mCurrentFrame,hectorPose,imuPose);
 	else
 		Optimizer::MapOptimization(&mCurrentFrame,hectorPose);
 
@@ -946,7 +968,7 @@ bool Tracking::TrackWithMotionModel()
 	if (debug_tracking)
 		printf("timestamps: %f %f\n",mCurrentFrame.mTimeStamp,hector_time_cur);
 	if (optim_fix_map)
-    	Optimizer::PoseOptimization(&mCurrentFrame,hectorPose);
+    	Optimizer::PoseOptimization(&mCurrentFrame,hectorPose,imuPose);
 	else
     	Optimizer::MapOptimization(&mCurrentFrame,hectorPose);
 
@@ -982,7 +1004,7 @@ bool Tracking::TrackLocalMap()
 
     // Optimize Pose
 	if (optim_fix_map)
-    	mnMatchesInliers = Optimizer::PoseOptimization(&mCurrentFrame,hectorPose);
+    	mnMatchesInliers = Optimizer::PoseOptimization(&mCurrentFrame,hectorPose,imuPose);
 	else
     	mnMatchesInliers = Optimizer::MapOptimization(&mCurrentFrame,hectorPose);
 	if (debug_tracking)
@@ -1333,7 +1355,7 @@ bool Tracking::Relocalisation()
 
                 int nGood;
 				if (optim_fix_map)
-					nGood = Optimizer::PoseOptimization(&mCurrentFrame,hectorPose);
+					nGood = Optimizer::PoseOptimization(&mCurrentFrame,hectorPose,imuPose);
 				else
 					nGood = Optimizer::MapOptimization(&mCurrentFrame,hectorPose);
 
@@ -1352,7 +1374,7 @@ bool Tracking::Relocalisation()
                     if(nadditional+nGood>=50)
                     {
 						if (optim_fix_map)
-							nGood = Optimizer::PoseOptimization(&mCurrentFrame,hectorPose);
+							nGood = Optimizer::PoseOptimization(&mCurrentFrame,hectorPose,imuPose);
 						else
 							nGood = Optimizer::MapOptimization(&mCurrentFrame,hectorPose);
 
@@ -1370,7 +1392,7 @@ bool Tracking::Relocalisation()
                             if(nGood+nadditional>=50)
                             {
 								if (optim_fix_map)
-									nGood = Optimizer::PoseOptimization(&mCurrentFrame,hectorPose);
+									nGood = Optimizer::PoseOptimization(&mCurrentFrame,hectorPose,imuPose);
 								else
 									nGood = Optimizer::MapOptimization(&mCurrentFrame,hectorPose);
 

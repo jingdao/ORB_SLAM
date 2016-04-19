@@ -330,7 +330,7 @@ void Optimizer::BundleAdjustment(const vector<KeyFrame *> &vpKFs, const vector<M
 
 }
 
-int Optimizer::PoseOptimization(Frame *pFrame,cv::Mat Tcw)
+int Optimizer::PoseOptimization(Frame *pFrame,cv::Mat lidarPose,cv::Mat imuPose)
 {    
     g2o::SparseOptimizer optimizer;
     g2o::BlockSolverX::LinearSolverType * linearSolver;
@@ -351,10 +351,19 @@ int Optimizer::PoseOptimization(Frame *pFrame,cv::Mat Tcw)
     // SET FRAME VERTEX
     g2o::VertexSE3Expmap * vSE3 = new g2o::VertexSE3Expmap();
     vSE3->setEstimate(Converter::toSE3Quat(pFrame->mTcw));
-//    vSE3->setEstimate(Converter::toSE3Quat(Tcw));
     vSE3->setId(0);
     vSE3->setFixed(false);
     optimizer.addVertex(vSE3);
+    g2o::VertexSE3Expmap * vSE3_lidar = new g2o::VertexSE3Expmap();
+    vSE3_lidar->setEstimate(Converter::toSE3Quat(lidarPose));
+    vSE3_lidar->setId(1);
+    vSE3_lidar->setFixed(true);
+    optimizer.addVertex(vSE3_lidar);
+    g2o::VertexSE3Expmap * vSE3_imu = new g2o::VertexSE3Expmap();
+    vSE3_imu->setEstimate(Converter::toSE3Quat(imuPose));
+    vSE3_imu->setId(2);
+    vSE3_imu->setFixed(true);
+    optimizer.addVertex(vSE3_imu);
 
     // SET MAP POINT VERTICES
     vector<g2o::EdgeSE3ProjectXYZ*> vpEdges;
@@ -377,7 +386,7 @@ int Optimizer::PoseOptimization(Frame *pFrame,cv::Mat Tcw)
         {
             g2o::VertexSBAPointXYZ* vPoint = new g2o::VertexSBAPointXYZ();
             vPoint->setEstimate(Converter::toVector3d(pMP->GetWorldPos()));
-            vPoint->setId(i+1);
+            vPoint->setId(i+3);
             vPoint->setFixed(true);
             optimizer.addVertex(vPoint);
             vVertices.push_back(vPoint);
@@ -392,7 +401,7 @@ int Optimizer::PoseOptimization(Frame *pFrame,cv::Mat Tcw)
 
             g2o::EdgeSE3ProjectXYZ* e = new g2o::EdgeSE3ProjectXYZ();
 
-            e->setVertex(0, dynamic_cast<g2o::OptimizableGraph::Vertex*>(optimizer.vertex(i+1)));
+            e->setVertex(0, dynamic_cast<g2o::OptimizableGraph::Vertex*>(optimizer.vertex(i+3)));
             e->setVertex(1, dynamic_cast<g2o::OptimizableGraph::Vertex*>(optimizer.vertex(0)));
             e->setMeasurement(obs);
             const float invSigma2 = pFrame->mvInvLevelSigma2[kpUn.octave];
@@ -401,7 +410,7 @@ int Optimizer::PoseOptimization(Frame *pFrame,cv::Mat Tcw)
             g2o::RobustKernelHuber* rk = new g2o::RobustKernelHuber;
             e->setRobustKernel(rk);
             rk->setDelta(delta);
-
+	
             e->fx = pFrame->fx;
             e->fy = pFrame->fy;
             e->cx = pFrame->cx;
@@ -415,8 +424,21 @@ int Optimizer::PoseOptimization(Frame *pFrame,cv::Mat Tcw)
             vInvSigmas2.push_back(invSigma2);
             vnIndexEdge.push_back(i);
         }
-
     }
+	g2o::EdgeSE3Expmap* lidarEdge = new g2o::EdgeSE3Expmap();
+	lidarEdge->setVertex(0, dynamic_cast<g2o::OptimizableGraph::Vertex*>(optimizer.vertex(0)));
+	lidarEdge->setVertex(1, dynamic_cast<g2o::OptimizableGraph::Vertex*>(optimizer.vertex(1)));
+	lidarEdge->setMeasurement(g2o::SE3Quat());
+	lidarEdge->setInformation(Eigen::Matrix<double,6,6>::Identity() * Tracking::lidar_errscale);
+	optimizer.addEdge(lidarEdge);
+	g2o::EdgeSE3Expmap* imuEdge = new g2o::EdgeSE3Expmap();
+	imuEdge->setVertex(0, dynamic_cast<g2o::OptimizableGraph::Vertex*>(optimizer.vertex(0)));
+	imuEdge->setVertex(1, dynamic_cast<g2o::OptimizableGraph::Vertex*>(optimizer.vertex(2)));
+	imuEdge->setMeasurement(g2o::SE3Quat());
+	Eigen::Matrix<double,6,6> I = Eigen::Matrix<double,6,6>::Zero();
+	I.block(0,0,3,3) = Eigen::Matrix<double,3,3>::Identity() * Tracking::imu_errscale;
+	imuEdge->setInformation(I);
+	optimizer.addEdge(imuEdge);
 
     // We perform 4 optimizations, decreasing the inlier region
     // From second to final optimization we include only inliers in the optimization
@@ -461,8 +483,15 @@ int Optimizer::PoseOptimization(Frame *pFrame,cv::Mat Tcw)
     g2o::VertexSE3Expmap* vSE3_recov = static_cast<g2o::VertexSE3Expmap*>(optimizer.vertex(0));
     g2o::SE3Quat SE3quat_recov = vSE3_recov->estimate();
     cv::Mat pose = Converter::toCvMat(SE3quat_recov);
-	if (Tracking::debug_optimizer)
-		printf("pose error: %f\n",cv::norm(pose.col(3)-Tcw.col(3)));
+	if (Tracking::debug_optimizer) {
+//		Eigen::Quaterniond q1 = vSE3->estimate().rotation();
+//		Eigen::Quaterniond q2 = vSE3_lidar->estimate().rotation();
+//		Eigen::Quaterniond q3 = vSE3_imu->estimate().rotation();
+//		printf("camera: %f %f %f %f\n",q1.w(),q1.x(),q1.y(),q1.z());
+//		printf("lidar: %f %f %f %f\n",q2.w(),q2.x(),q2.y(),q2.z());
+//		printf("imu: %f %f %f %f\n",q3.w(),q3.x(),q3.y(),q3.z());
+		printf("pose error: %f %f %f %f\n",optimizer.activeChi2(),cv::norm(pose.col(3)-lidarPose.col(3)),lidarEdge->chi2(),imuEdge->chi2());
+	}
     pose.copyTo(pFrame->mTcw);
 
     return nInitialCorrespondences-nBad;
